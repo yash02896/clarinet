@@ -21,7 +21,7 @@ mod indexer;
 mod integrate;
 mod lsp;
 mod poke;
-mod publish;
+mod deployment;
 mod runnner;
 mod types;
 mod utils;

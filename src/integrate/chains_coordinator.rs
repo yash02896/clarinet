@@ -2,9 +2,9 @@ use super::DevnetEvent;
 use crate::indexer::{chains, Indexer, IndexerConfig};
 use crate::integrate::{MempoolAdmissionData, ServiceStatusData, Status};
 use crate::poke::load_session;
-use crate::publish::publish_all_contracts;
+use crate::deployment::publish_all_contracts;
 use crate::types::{self, DevnetConfig};
-use crate::types::{BitcoinChainEvent, ChainsCoordinatorCommand, Network, StacksChainEvent};
+use crate::types::{BitcoinChainEvent, ChainsCoordinatorCommand, StacksNetwork, StacksChainEvent};
 use crate::utils;
 use crate::utils::stacks::{transactions, PoxInfo, StacksRpc};
 use base58::FromBase58;
@@ -78,7 +78,7 @@ pub struct BitcoinRPCRequest {
 impl StacksEventObserverConfig {
     pub fn new(devnet_config: DevnetConfig, manifest_path: PathBuf) -> Self {
         info!("Checking contracts...");
-        let (session, config) = match load_session(&manifest_path, false, &Network::Devnet) {
+        let (session, config) = match load_session(&manifest_path, false, &StacksNetwork::Devnet) {
             Ok((session, config, _, _)) => (session, config),
             Err((_, e)) => {
                 println!("{}", e);
@@ -176,8 +176,8 @@ pub async fn start_chains_coordinator(
                 "/",
                 routes![
                     handle_ping,
-                    handle_new_burn_block,
-                    handle_new_block,
+                    handle_new_bitcoin_block,
+                    handle_new_stacks_block,
                     handle_new_microblocks,
                     handle_new_mempool_tx,
                     handle_drop_mempool_tx,
@@ -208,7 +208,7 @@ pub async fn start_chains_coordinator(
                     .send(DevnetEvent::info("Reloading contracts".into()))
                     .expect("Unable to terminate event observer");
 
-                let session = match load_session(&manifest_path, false, &Network::Devnet) {
+                let session = match load_session(&manifest_path, false, &StacksNetwork::Devnet) {
                     Ok((session, _, _, _)) => session,
                     Err((_, e)) => {
                         devnet_event_tx
@@ -327,10 +327,11 @@ pub async fn start_chains_coordinator(
 }
 
 #[post("/new_burn_block", format = "json", data = "<marshalled_block>")]
-pub fn handle_new_burn_block(
+pub fn handle_new_bitcoin_block(
     indexer_rw_lock: &State<Arc<RwLock<Indexer>>>,
     devnet_events_tx: &State<Arc<Mutex<Sender<DevnetEvent>>>>,
     marshalled_block: Json<JsonValue>,
+    background_job_tx_mutex: &State<Arc<Mutex<Sender<ChainsCoordinatorCommand>>>>,
 ) -> Json<JsonValue> {
     let devnet_events_tx = devnet_events_tx.inner();
 
@@ -391,7 +392,7 @@ pub fn handle_new_burn_block(
 }
 
 #[post("/new_block", format = "application/json", data = "<marshalled_block>")]
-pub fn handle_new_block(
+pub fn handle_new_stacks_block(
     indexer_rw_lock: &State<Arc<RwLock<Indexer>>>,
     devnet_events_tx: &State<Arc<Mutex<Sender<DevnetEvent>>>>,
     init_status: &State<Arc<RwLock<DevnetInitializationStatus>>>,
@@ -638,7 +639,7 @@ pub fn publish_initial_contracts(
     std::thread::spawn(move || {
         let _ = publish_all_contracts(
             &moved_manifest_path,
-            &Network::Devnet,
+            &StacksNetwork::Devnet,
             false,
             1,
             Some(&moved_devnet_event_tx),

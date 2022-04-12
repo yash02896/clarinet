@@ -1,0 +1,25 @@
+---
+name: "Mainnet Deployment"
+created-at: 0
+network: mainnet
+start-block: 560065
+tx-plan:
+  batches:
+    - transactions:
+      - contract-publish:
+        seq: 0
+        contract: counter
+        expected-sender: SP3FBR2AGK5H9QBDH3EEN6DF8EK8JY7RX8QJ5SVTE 
+        path: ./contracts/counter.clar
+      - contract-publish:
+        seq: 1
+        contract: counter
+        expected-sender: SP3FBR2AGK5H9QBDH3EEN6DF8EK8JY7RX8QJ5SVTE 
+        path: ./contracts/counter.clar
+      - contract-call:
+        seq: 2
+        contract_id: "my-contract-v1"
+        expected-sender: SP3FBR2AGK5H9QBDH3EEN6DF8EK8JY7RX8QJ5SVTE 
+        method: "say-hi"
+        arguments:
+              - u1

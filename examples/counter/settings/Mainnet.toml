@@ -1,0 +1,7 @@
+[network]
+name = "mainnet"
+node_rpc_address = "https://stacks-node-api.mainnet.stacks.co"
+deployment_fee_rate = 10
+
+[accounts.deployer]
+mnemonic = "cherry regret clap kick lizard lemon ankle defense room sword tuition easily return swallow double gaze walnut globe biology matrix inject twenty genius remove"

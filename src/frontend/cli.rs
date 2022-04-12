@@ -1,5 +1,5 @@
-use std::collections::{BTreeSet, HashMap};
 use std::fs::{self, File};
+use std::collections::{BTreeSet, HashMap};
 use std::io::{prelude::*, BufReader, Read};
 use std::path::PathBuf;
 use std::{env, process};
@@ -11,13 +11,14 @@ use crate::generate::{
 use crate::integrate::{self, DevnetOrchestrator};
 use crate::lsp::run_lsp;
 use crate::poke::load_session;
-use crate::publish::publish_all_contracts;
+use crate::deployment::{publish_all_contracts, check_deployments};
 use crate::runnner::run_scripts;
-use crate::types::{Network, ProjectManifest, ProjectManifestFile, RequirementConfig};
+use crate::types::{StacksNetwork, ProjectManifest, ProjectManifestFile, RequirementConfig};
+use crate::deployment::{setup_session_from_deployment, load_deployment, create_default_test_deployment, display_deployment, write_deployment};
 use clarity_repl::clarity::analysis::{AnalysisDatabase, ContractAnalysis};
 use clarity_repl::clarity::costs::LimitedCostTracker;
 use clarity_repl::clarity::types::QualifiedContractIdentifier;
-use clarity_repl::{analysis, repl};
+use clarity_repl::{analysis, repl, Terminal};
 
 use clap::{IntoApp, Parser, Subcommand};
 use clap_generate::{Generator, Shell};
@@ -41,6 +42,9 @@ enum Command {
     /// Subcommands for working with contracts
     #[clap(subcommand, name = "contracts")]
     Contracts(Contracts),
+    /// Subcommands for working with deployments
+    #[clap(subcommand, name = "deployments")]
+    Deployments(Deployments),    
     /// Load contracts in a REPL for an interactive session
     #[clap(name = "console", aliases = &["poke"], bin_name = "console")]
     Console(Console),
@@ -79,6 +83,14 @@ enum Contracts {
     /// Publish contracts on chain
     #[clap(name = "publish", bin_name = "publish")]
     Publish(Publish),
+}
+
+#[derive(Subcommand, PartialEq, Clone, Debug)]
+#[clap(bin_name = "deployment", aliases = &["deployments"])]
+enum Deployments {
+    /// Check deployments format
+    #[clap(name = "check", bin_name = "check")]
+    CheckDeployments(CheckDeployments),
 }
 
 #[derive(Parser, PartialEq, Clone, Debug)]
@@ -148,11 +160,23 @@ struct Publish {
     pub manifest_path: Option<String>,
 }
 
+
+#[derive(Parser, PartialEq, Clone, Debug)]
+struct CheckDeployments {
+    /// Path to Clarinet.toml
+    #[clap(long = "manifest-path")]
+    pub manifest_path: Option<String>,
+}
+
 #[derive(Parser, PartialEq, Clone, Debug)]
 struct Console {
     /// Path to Clarinet.toml
     #[clap(long = "manifest-path")]
     pub manifest_path: Option<String>,
+    /// Path to Clarinet.toml
+    #[clap(long = "deployment-plan-path")]
+    pub deployment_plan_path: Option<String>,
+    
 }
 
 #[derive(Parser, PartialEq, Clone, Debug)]
@@ -311,6 +335,14 @@ pub fn main() {
                 )));
             }
         }
+        Command::Deployments(subcommand) => match subcommand {
+            Deployments::CheckDeployments(cmd) => {
+                let manifest_path = get_manifest_path_or_exit(cmd.manifest_path);
+                // Ensure that all the deployments can correctly be deserialized.
+                println!("Checking deployments");
+                check_deployments(&manifest_path);
+            }
+        },
         Command::Contracts(subcommand) => match subcommand {
             Contracts::NewContract(new_contract) => {
                 let manifest_path = get_manifest_path_or_exit(new_contract.manifest_path);
@@ -407,11 +439,11 @@ pub fn main() {
                 let manifest_path = get_manifest_path_or_exit(deploy.manifest_path);
 
                 let network = if deploy.devnet == true {
-                    Network::Devnet
+                    StacksNetwork::Devnet
                 } else if deploy.testnet == true {
-                    Network::Testnet
+                    StacksNetwork::Testnet
                 } else if deploy.mainnet == true {
-                    Network::Mainnet
+                    StacksNetwork::Mainnet
                 } else {
                     panic!(
                         "Target deployment must be specified with --devnet, --testnet or --mainnet"
@@ -442,46 +474,97 @@ pub fn main() {
         },
         Command::Console(cmd) => {
             let manifest_path = get_manifest_path_or_exit(cmd.manifest_path);
-            let start_repl = true;
-            let (session, project_manifest) =
-                match load_session(&manifest_path, start_repl, &Network::Devnet) {
-                    Ok((session, _, project_manifest, _)) => (Some(session), project_manifest),
-                    Err((project_manifest, e)) => {
-                        println!("{}: Unable to start REPL: {}", red!("error"), e);
-                        (None, project_manifest)
+
+            let deployment_path = get_deployment_or_default_to_test(&manifest_path, cmd.deployment_plan_path);
+
+            let deployment = if fs::metadata(&deployment_path).is_err() {
+                println!("No deployment plan specified, and a default deployments/test.yaml could not be found.");
+                println!("Do you want to generate a default plan?");
+                
+                // Create and display a `deployments/test.yaml` file
+                let deployment = match create_default_test_deployment(&manifest_path) {
+                    Ok(deployment) => deployment,
+                    Err(message) => {
+                        println!("{}", message);
+                        std::process::exit(1);
                     }
                 };
-            if hints_enabled {
-                display_post_console_hint();
-            }
-            if project_manifest.project.telemetry {
-                #[cfg(feature = "telemetry")]
-                telemetry_report_event(DeveloperUsageEvent::PokeExecuted(
-                    DeveloperUsageDigest::new(
-                        &project_manifest.project.name,
-                        &project_manifest.project.authors,
-                    ),
-                ));
+                display_deployment(&deployment);
+                println!("Do you want to save this deployment to disk and proceed with this deployment? Y/n");
+                
+                write_deployment(&deployment, &deployment_path).expect("Unable to save deployment");   
+                
+                deployment
+            } else {
+                let deployment = match load_deployment(&manifest_path, &deployment_path) {
+                    Ok(deployment) => deployment,
+                    Err(message) => {
+                        println!("{}", message);
+                        std::process::exit(1);
+                    }
+                };
+    
+                deployment
+            };
 
-                #[cfg(feature = "telemetry")]
-                if let Some(session) = session {
-                    let mut debug_count = 0;
-                    for command in session.executed {
-                        if command.starts_with("::debug") {
-                            debug_count += 1;
-                        }
-                    }
-                    if debug_count > 0 {
-                        telemetry_report_event(DeveloperUsageEvent::DebugStarted(
-                            DeveloperUsageDigest::new(
-                                &project_manifest.project.name,
-                                &project_manifest.project.authors,
-                            ),
-                            debug_count,
-                        ));
-                    }
+            let session = match setup_session_from_deployment(&deployment) {
+                Ok(settings) => settings,
+                Err(message) => {
+                    println!("{}", message);
+                    std::process::exit(1);
                 }
-            }
+            };
+        
+            let mut terminal = Terminal::load(session);
+            terminal.start();
+
+            // let session = terminal.session;
+
+            // let (session, output) = if start_repl {
+            //     let mut terminal = Terminal::new(settings.clone());
+            //     terminal.start();
+            //     (terminal.session.clone(), None)
+            // }
+
+            // let (session, project_manifest) =
+            //     match load_session_settings(&manifest_path, &StacksNetwork::Devnet) {
+            //         Ok((session, _, project_manifest, _)) => (Some(session), project_manifest),
+            //         Err((project_manifest, e)) => {
+            //             println!("{}: Unable to start REPL: {}", red!("error"), e);
+            //             (None, project_manifest)
+            //         }
+            //     };
+            // if hints_enabled {
+            //     display_post_console_hint();
+            // }
+            // if project_manifest.project.telemetry {
+            //     #[cfg(feature = "telemetry")]
+            //     telemetry_report_event(DeveloperUsageEvent::PokeExecuted(
+            //         DeveloperUsageDigest::new(
+            //             &project_manifest.project.name,
+            //             &project_manifest.project.authors,
+            //         ),
+            //     ));
+
+            //     #[cfg(feature = "telemetry")]
+            //     if let Some(session) = session {
+            //         let mut debug_count = 0;
+            //         for command in session.executed {
+            //             if command.starts_with("::debug") {
+            //                 debug_count += 1;
+            //             }
+            //         }
+            //         if debug_count > 0 {
+            //             telemetry_report_event(DeveloperUsageEvent::DebugStarted(
+            //                 DeveloperUsageDigest::new(
+            //                     &project_manifest.project.name,
+            //                     &project_manifest.project.authors,
+            //                 ),
+            //                 debug_count,
+            //             ));
+            //         }
+            //     }
+            // }
         }
         Command::Check(cmd) if cmd.file.is_some() => {
             let file = cmd.file.unwrap();
@@ -541,7 +624,7 @@ pub fn main() {
         Command::Check(cmd) => {
             let manifest_path = get_manifest_path_or_exit(cmd.manifest_path);
             let start_repl = false;
-            let project_manifest = match load_session(&manifest_path, start_repl, &Network::Devnet)
+            let project_manifest = match load_session(&manifest_path, start_repl, &StacksNetwork::Devnet)
             {
                 Err((_, e)) => {
                     println!("{}", e);
@@ -575,7 +658,7 @@ pub fn main() {
         Command::Test(cmd) => {
             let manifest_path = get_manifest_path_or_exit(cmd.manifest_path);
             let start_repl = false;
-            let res = load_session(&manifest_path, start_repl, &Network::Devnet);
+            let res = load_session(&manifest_path, start_repl, &StacksNetwork::Devnet);
             let (session, project_manifest) = match res {
                 Ok((session, _, manifest, output)) => {
                     if let Some(message) = output {
@@ -622,7 +705,7 @@ pub fn main() {
         Command::Run(cmd) => {
             let manifest_path = get_manifest_path_or_exit(cmd.manifest_path);
             let start_repl = false;
-            let res = load_session(&manifest_path, start_repl, &Network::Devnet);
+            let res = load_session(&manifest_path, start_repl, &StacksNetwork::Devnet);
             let session = match res {
                 Ok((session, _, _, output)) => {
                     if let Some(message) = output {
@@ -711,7 +794,6 @@ fn get_manifest_path(path: Option<String>) -> Option<PathBuf> {
 }
 
 fn get_manifest_path_or_exit(path: Option<String>) -> PathBuf {
-    println!("");
     match get_manifest_path(path) {
         Some(manifest_path) => manifest_path,
         None => {
@@ -719,6 +801,19 @@ fn get_manifest_path_or_exit(path: Option<String>) -> PathBuf {
             process::exit(1);
         }
     }
+}
+
+fn get_deployment_or_default_to_test(manifest_path: &PathBuf, path: Option<String>) -> PathBuf {
+    let mut deployment_path = manifest_path.clone();
+    deployment_path.pop();
+    match path {
+        Some(path) => deployment_path.push(path),
+        None => {
+            deployment_path.push("deployments");
+            deployment_path.push("test.yaml");
+        }
+    }
+    deployment_path
 }
 
 fn execute_changes(changes: Vec<Changes>) -> bool {

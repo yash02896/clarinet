@@ -1,7 +1,13 @@
 mod ui;
+mod types;
+
+use clarity_repl::clarity::types::{StandardPrincipalData, PrincipalData, QualifiedContractIdentifier};
+use clarity_repl::clarity::{ClarityName, ContractName};
+use self::types::{DeploymentSpecification, TransactionPlanSpecificationFile, ContractCallSpecificationFile, EmulatedContractPublishSpecification, TransactionsBatchSpecification, TransactionPlanSpecification, GenesisSpecification, WalletSpecification};
+use crate::deployment::types::{DeploymentSpecificationFile, TransactionsBatchSpecificationFile, TransactionSpecificationFile, TransactionSpecification};
 use crate::integrate::DevnetEvent;
 use crate::poke::{load_session, load_session_settings};
-use crate::types::{ChainsCoordinatorCommand, Network, ProjectManifest};
+use crate::types::{ChainsCoordinatorCommand, StacksNetwork, ProjectManifest, ChainConfig};
 use crate::utils::mnemonic;
 use crate::utils::stacks::StacksRpc;
 use clarity_repl::clarity::codec::transaction::{
@@ -26,13 +32,17 @@ use clarity_repl::clarity::{
         StacksAddress,
     },
 };
+use clarity_repl::repl::Session;
 use clarity_repl::repl::settings::{Account, InitialContract};
 use libsecp256k1::{PublicKey, SecretKey};
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::mpsc::channel;
 use std::sync::mpsc::Sender;
+use std::fs::{self, File};
+use std::io::Write;
 use tiny_hderive::bip32::ExtendedPrivKey;
+use serde_yaml;
 
 #[derive(Deserialize, Debug)]
 pub struct Balance {
@@ -68,7 +78,7 @@ pub fn endode_contract(
     account: &Account,
     nonce: u64,
     deployment_fee_rate: u64,
-    network: &Network,
+    network: &StacksNetwork,
 ) -> Result<(StacksTransaction, StacksAddress), String> {
     let contract_name = contract.name.clone().unwrap();
 
@@ -94,7 +104,7 @@ pub fn endode_contract(
 
     let signer_addr = StacksAddress::from_public_keys(
         match network {
-            Network::Mainnet => C32_ADDRESS_VERSION_MAINNET_SINGLESIG,
+            StacksNetwork::Mainnet => C32_ADDRESS_VERSION_MAINNET_SINGLESIG,
             _ => C32_ADDRESS_VERSION_TESTNET_SINGLESIG,
         },
         &AddressHashMode::SerializeP2PKH,
@@ -115,11 +125,11 @@ pub fn endode_contract(
     let auth = TransactionAuth::Standard(spending_condition);
     let unsigned_tx = StacksTransaction {
         version: match network {
-            Network::Mainnet => TransactionVersion::Mainnet,
+            StacksNetwork::Mainnet => TransactionVersion::Mainnet,
             _ => TransactionVersion::Testnet,
         },
         chain_id: match network {
-            Network::Mainnet => 0x00000001,
+            StacksNetwork::Mainnet => 0x00000001,
             _ => 0x80000000,
         },
         auth: auth,
@@ -148,7 +158,7 @@ pub fn publish_contract(
     deployers_nonces: &mut HashMap<String, u64>,
     node_url: &str,
     deployment_fee_rate: u64,
-    network: &Network,
+    network: &StacksNetwork,
 ) -> Result<(String, u64, String, String), String> {
     let contract_name = contract.name.clone().unwrap();
 
@@ -184,7 +194,7 @@ pub fn publish_contract(
 /// this method is being used by developers
 pub fn publish_all_contracts(
     manifest_path: &PathBuf,
-    network: &Network,
+    network: &StacksNetwork,
     analysis_enabled: bool,
     delay_between_checks: u32,
     devnet_event_tx: Option<&Sender<DevnetEvent>>,
@@ -431,4 +441,417 @@ pub fn publish_all_contracts(
     }
 
     Ok((results, project_manifest))
+}
+
+pub fn setup_session_from_deployment(deployment: &DeploymentSpecification) -> Result<Session, String> {
+    use clarity_repl::repl::SessionSettings;
+    use crate::deployment::types::TransactionSpecification;
+
+    let mut settings = SessionSettings::default();
+    let mut session = Session::new(settings);
+
+    // let mut project_path = manifest_path.clone();
+    // project_path.pop();
+
+    // let mut chain_config_path = project_path.clone();
+    // // chain_config_path.pop();
+    // chain_config_path.push("settings");
+
+    // chain_config_path.push(match env {
+    //     StacksNetwork::Devnet => "Devnet.toml",
+    //     StacksNetwork::Testnet => "Testnet.toml",
+    //     StacksNetwork::Mainnet => "Mainnet.toml",
+    // });
+
+    // let mut project_config = ProjectManifest::from_path(&manifest_path);
+    // let chain_config = ChainConfig::from_path(&chain_config_path, env);
+
+    // let mut deployer_address = None;
+    // let mut initial_deployer = None;
+
+    // settings.node = chain_config
+    //     .network
+    //     .node_rpc_address
+    //     .clone()
+    //     .take()
+    //     .unwrap_or(match env {
+    //         StacksNetwork::Devnet => "http://127.0.0.1:20443".into(),
+    //         StacksNetwork::Testnet => "https://stacks-node-api.testnet.stacks.co".into(),
+    //         StacksNetwork::Mainnet => "https://stacks-node-api.mainnet.stacks.co".into(),
+    //     });
+
+    // settings.include_boot_contracts = vec![
+    //     "pox".to_string(),
+    //     "costs-v1".to_string(),
+    //     "costs-v2".to_string(),
+    //     "bns".to_string(),
+    // ];
+    // settings.initial_deployer = initial_deployer;
+    // settings.repl_settings = project_config.repl_settings.clone();
+    // settings.disk_cache_enabled = true;
+
+    if let Some(ref genesis) = deployment.genesis {
+        for wallet in genesis.wallets.iter() {
+            let _ = session.interpreter.mint_stx_balance(wallet.principal.clone().into(), wallet.amount.try_into().unwrap());
+        }
+    }
+
+    for batch in deployment.plan.batches.iter() {
+        for transaction in batch.transactions.iter() {
+            match transaction {
+                TransactionSpecification::ContractCall(_) | TransactionSpecification::ContractPublish(_) => {}
+                TransactionSpecification::EmulatedContractPublish(tx) => {
+                    let default_tx_sender = session.get_tx_sender();
+                    session.set_tx_sender(tx.emulated_sender.to_string());
+                    let _ = session.interpret(tx.source.clone(), Some(tx.contract.to_string()), false, false, None);
+                    session.set_tx_sender(default_tx_sender);
+                }
+                TransactionSpecification::EmulatedContractCall(tx) => {
+                    let _ = session.invoke_contract_call(&tx.contract_id.to_string(), &tx.method.to_string(), &tx.parameters, &tx.emulated_sender.to_string(), "deployment".to_string());
+                }
+            }
+        }
+        session.advance_chain_tip(1);
+    }
+
+    Ok(session)
+    // for (name, account) in deployment..accounts.iter() {
+    //     let account = repl::settings::Account {
+    //         name: name.clone(),
+    //         balance: account.balance,
+    //         address: account.address.clone(),
+    //         mnemonic: account.mnemonic.clone(),
+    //         derivation: account.derivation.clone(),
+    //     };
+    //     if name == "deployer" {
+    //         initial_deployer = Some(account.clone());
+    //         deployer_address = Some(account.address.clone());
+    //     }
+    //     settings.initial_accounts.push(account);
+    // }
+
+    // for name in project_config.ordered_contracts().iter() {
+    //     let config = project_config.contracts.get(name).unwrap();
+    //     let mut contract_path = project_path.clone();
+    //     contract_path.push(&config.path);
+
+    //     let code = match fs::read_to_string(&contract_path) {
+    //         Ok(code) => code,
+    //         Err(err) => {
+    //             return Err(format!(
+    //                 "Error: unable to read {:?}: {}",
+    //                 contract_path, err
+    //             ))
+    //         }
+    //     };
+
+    //     settings
+    //         .initial_contracts
+    //         .push(repl::settings::InitialContract {
+    //             code: code,
+    //             path: contract_path.to_str().unwrap().into(),
+    //             name: Some(name.clone()),
+    //             deployer: deployer_address.clone(),
+    //         });
+    // }
+
+    // let links = match project_config.project.requirements.take() {
+    //     Some(links) => links,
+    //     None => vec![],
+    // };
+
+    // for link_config in links.iter() {
+    //     settings.initial_links.push(repl::settings::InitialLink {
+    //         contract_id: link_config.contract_id.clone(),
+    //         stacks_node_addr: None,
+    //         cache: Some(project_config.project.cache_dir.clone()),
+    //     });
+    // }
+
+    // settings.include_boot_contracts = vec![
+    //     "pox".to_string(),
+    //     "costs-v1".to_string(),
+    //     "costs-v2".to_string(),
+    //     "bns".to_string(),
+    // ];
+    // settings.initial_deployer = initial_deployer;
+    // settings.repl_settings = project_config.repl_settings.clone();
+    // settings.disk_cache_enabled = true;
+}
+
+pub fn check_deployments(manifest_path: &PathBuf) -> Result<(), String> {
+    let mut base_path = manifest_path.clone();
+    base_path.pop();
+    let files = get_deployments_files(manifest_path)?;
+    for (path, relative_path) in files.into_iter() {
+        let spec = match DeploymentSpecification::from_config_file(&path, &base_path) {
+            Ok(spec) => spec,
+            Err(msg) => {
+                println!("{} {} syntax incorrect\n{}", red!("x"), relative_path, msg);
+                continue;        
+            }
+        };
+        println!("{} {} succesfully checked", green!("✔"), relative_path);    
+    }
+    Ok(())
+}
+
+pub fn load_deployment(manifest_path: &PathBuf, deployment_path: &PathBuf) -> Result<DeploymentSpecification, String> {
+    let mut base_path = manifest_path.clone();
+    base_path.pop();
+    let spec = match DeploymentSpecification::from_config_file(&deployment_path, &base_path) {
+        Ok(spec) => spec,
+        Err(msg) => {
+            return Err(format!("{} {} syntax incorrect\n{}", red!("x"), deployment_path.display(), msg));
+        }
+    };
+    Ok(spec)
+}
+
+fn get_deployments_files(manifest_path: &PathBuf) -> Result<Vec<(PathBuf, String)>, String> {
+    let mut hooks_home = manifest_path.clone();
+    hooks_home.pop();
+    let suffix_len = hooks_home.to_str().unwrap().len() + 1;
+    hooks_home.push("deployments");
+    let paths = match fs::read_dir(&hooks_home) {
+        Ok(paths) => paths,
+        Err(_) => return Ok(vec![])
+    };
+    let mut hook_paths = vec![];
+    for path in paths {
+        let file = path.unwrap().path();
+        let is_extension_valid = file.extension()
+            .and_then(|ext| ext.to_str())
+            .and_then(|ext| Some(ext == "yml" || ext == "yaml"));
+
+        if let Some(true) = is_extension_valid {
+            let relative_path = file.clone();
+            let (_, relative_path) = relative_path.to_str().unwrap().split_at(suffix_len);
+            hook_paths.push((file, relative_path.to_string()));
+        }
+    }
+
+    Ok(hook_paths)
+}
+
+pub fn write_deployment(deployment: &DeploymentSpecification, target_path: &PathBuf) -> Result<(), String> {
+
+    let file = deployment.to_specification_file();
+
+    let content = match serde_yaml::to_string(&file) {
+        Ok(res) => res,
+        Err(err) => {
+            return Err(format!("unable to serialize deployment {}", err))
+        }
+    };
+
+    let mut file = match File::create(&target_path) {
+        Ok(file) => file,
+        Err(e) => {
+            return Err(format!(
+                "unable to create file {}: {}",
+                target_path.display(),
+                e
+            ));
+        }
+    };
+    match file.write_all(content.as_bytes()) {
+        Ok(_) => (),
+        Err(e) => {
+            return Err(format!(
+                "unable to write file {}: {}",
+                target_path.display(),
+                e
+            ));
+        }
+    };
+    Ok(())
+}
+
+pub fn create_default_test_deployment(manifest_path: &PathBuf) -> Result<DeploymentSpecification, String> {
+
+    let network = StacksNetwork::Devnet;
+
+    let mut project_path = manifest_path.clone();
+    project_path.pop();
+
+    let mut chain_config_path = project_path.clone();
+    chain_config_path.push("settings");
+
+    chain_config_path.push(match network {
+        StacksNetwork::Devnet => "Devnet.toml",
+        StacksNetwork::Testnet => "Testnet.toml",
+        StacksNetwork::Mainnet => "Mainnet.toml",
+    });
+
+    let mut project_config = ProjectManifest::from_path(&manifest_path);
+    let chain_config = ChainConfig::from_path(&chain_config_path, &network);
+
+    let default_deployer = match chain_config.accounts.get("deployer") {
+        Some(deployer) => deployer,
+        None => {
+            return Err(format!("{} unable to retrieve default deployer account in {}", red!("x"), chain_config_path.display()));
+        }
+    };
+
+    let tx_chain_limit = 25;
+    let mut contracts = HashMap::new();
+
+    for (name, config) in project_config.contracts.iter() {
+
+        let contract = match ContractName::try_from(name.to_string()) {
+            Ok(res) => res,
+            Err(_) => return Err(format!("unable to use {} as a valid contract name", name))
+        };
+
+        let deployer = match config.deployer {
+            Some(ref deployer) => {
+                let deployer = match chain_config.accounts.get(deployer) {
+                    Some(deployer) => deployer,
+                    None => {
+                        return Err(format!("{} unable to retrieve account {} in {}", red!("x"), deployer, chain_config_path.display()));
+                    }
+                };
+                deployer
+            }
+            None => default_deployer
+        };
+
+        let emulated_sender = match PrincipalData::parse_standard_principal(&deployer.address) {
+            Ok(res) => res,
+            Err(_) => return Err(format!("unable to turn emulated_sender {} as a valid Stacks address", deployer.address))
+        };
+
+        let source = match  std::fs::read_to_string(&config.path) {
+            Ok(code) => code,
+            Err(err) => {
+                return Err(format!(
+                    "unable to read contract at path {:?}: {}",
+                    config.path, err
+                ))
+            }
+        };
+
+        let contract = EmulatedContractPublishSpecification {
+            contract,
+            emulated_sender,
+            source,
+            relative_path: config.path.clone(),
+        };
+
+        let contract_id = QualifiedContractIdentifier::new(contract.emulated_sender.clone(), contract.contract.clone());
+
+        contracts.insert(contract_id, contract);
+    }
+
+    use clarity_repl::repl::SessionSettings;
+    use clarity_repl::analysis::ast_dependency_detector::ASTDependencyDetector;
+
+    let settings = SessionSettings::default();
+    let mut session = Session::new(settings);
+
+    let mut contract_asts = HashMap::new();
+
+    for (contract_id, contract) in contracts.iter() {
+        let (ast, _, _) = session.interpreter.build_ast(
+            contract_id.clone(),
+            contract.source.clone(),
+            2,
+        );
+        contract_asts.insert(contract_id.clone(), ast);
+    }
+
+    let dependencies =
+    ASTDependencyDetector::detect_dependencies(&contract_asts, &BTreeMap::new());
+    let ordered_contracts_ids = match ASTDependencyDetector::order_contracts(&dependencies) {
+        Ok(ordered_contracts) => ordered_contracts,
+        Err(e) => {
+            return Err(format!(
+                "unable order contracts {}",
+                e
+            ))
+        }
+    };
+
+    let mut transactions = vec![];
+    for contract_id in ordered_contracts_ids.iter() {
+        let data = contracts.remove(contract_id).expect("unable to retrieve contract");
+        let tx = TransactionSpecification::EmulatedContractPublish(data);
+        transactions.push(tx);
+    }
+
+    let mut batches = vec![];
+    for (id, transactions) in transactions.chunks(25).enumerate() {
+        batches.push(TransactionsBatchSpecification {
+            id: id,
+            transactions: transactions.to_vec()
+        })
+    }
+
+    let mut wallets = vec![];
+    for (label, account) in chain_config.accounts.into_iter() {
+
+        let principal = match PrincipalData::parse_standard_principal(&account.address) {
+            Ok(res) => res,
+            Err(_) => return Err(format!("unable to parse wallet {} in a valid Stacks address", account.address))
+        };
+
+        wallets.push(WalletSpecification {
+            label,
+            principal,
+            amount: account.balance.into(),
+        });
+    }
+
+    // TODO(lgalabru): use project_config.repl_settings.include_boot_contracts.clone()
+    let boot_contracts = vec![
+        "pox".to_string(),
+        "costs-v1".to_string(),
+        "costs-v2".to_string(),
+        "bns".to_string(),
+    ];
+
+    let deployment = DeploymentSpecification {
+        id: 0,
+        name: "Test deployment, used by default by `clarinet console`, `clarinet test` and `clarinet check`".to_string(),
+        network: None,
+        start_block: 0,
+        genesis: Some(GenesisSpecification {
+            wallets,
+            contracts: boot_contracts
+        }),
+        plan: TransactionPlanSpecification {
+            batches
+        }
+    };
+
+    // let links = match project_config.project.requirements.take() {
+    //     Some(links) => links,
+    //     None => vec![],
+    // };
+
+    // for link_config in links.iter() {
+    //     settings.initial_links.push(repl::settings::InitialLink {
+    //         contract_id: link_config.contract_id.clone(),
+    //         stacks_node_addr: None,
+    //         cache: Some(project_config.project.cache_dir.clone()),
+    //     });
+    // }
+
+    // settings.include_boot_contracts = vec![
+    //     "pox".to_string(),
+    //     "costs-v1".to_string(),
+    //     "costs-v2".to_string(),
+    //     "bns".to_string(),
+    // ];
+    // settings.initial_deployer = initial_deployer;
+    // settings.repl_settings = project_config.repl_settings.clone();
+    // settings.disk_cache_enabled = true;
+
+    Ok(deployment)
+}
+
+
+pub fn display_deployment(deployment: &DeploymentSpecification) {
+
 }
