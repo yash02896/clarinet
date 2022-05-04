@@ -668,9 +668,7 @@ pub fn write_deployment(deployment: &DeploymentSpecification, target_path: &Path
     Ok(())
 }
 
-pub fn create_default_test_deployment(manifest_path: &PathBuf) -> Result<DeploymentSpecification, String> {
-
-    let network = StacksNetwork::Devnet;
+pub fn generate_default_deployment(manifest_path: &PathBuf, network: Option<StacksNetwork>) -> Result<DeploymentSpecification, String> {
 
     let mut project_path = manifest_path.clone();
     project_path.pop();
@@ -679,13 +677,16 @@ pub fn create_default_test_deployment(manifest_path: &PathBuf) -> Result<Deploym
     chain_config_path.push("settings");
 
     chain_config_path.push(match network {
-        StacksNetwork::Devnet => "Devnet.toml",
-        StacksNetwork::Testnet => "Testnet.toml",
-        StacksNetwork::Mainnet => "Mainnet.toml",
+        None | Some(StacksNetwork::Devnet) => "Devnet.toml",
+        Some(StacksNetwork::Testnet) => "Testnet.toml",
+        Some(StacksNetwork::Mainnet) => "Mainnet.toml",
     });
 
     let mut project_config = ProjectManifest::from_path(&manifest_path);
-    let chain_config = ChainConfig::from_path(&chain_config_path, &network);
+    let chain_config = ChainConfig::from_path(&chain_config_path, match network {
+        None => &StacksNetwork::Devnet,
+        Some(ref network) => network,
+    });
 
     let default_deployer = match chain_config.accounts.get("deployer") {
         Some(deployer) => deployer,
@@ -694,7 +695,6 @@ pub fn create_default_test_deployment(manifest_path: &PathBuf) -> Result<Deploym
         }
     };
 
-    let tx_chain_limit = 25;
     let mut contracts = HashMap::new();
 
     for (name, config) in project_config.contracts.iter() {
@@ -780,6 +780,8 @@ pub fn create_default_test_deployment(manifest_path: &PathBuf) -> Result<Deploym
         transactions.push(tx);
     }
 
+    let tx_chain_limit = 25;
+
     let mut batches = vec![];
     for (id, transactions) in transactions.chunks(25).enumerate() {
         batches.push(TransactionsBatchSpecification {
@@ -806,7 +808,6 @@ pub fn create_default_test_deployment(manifest_path: &PathBuf) -> Result<Deploym
     // TODO(lgalabru): use project_config.repl_settings.include_boot_contracts.clone()
     let boot_contracts = vec![
         "pox".to_string(),
-        "costs-v1".to_string(),
         "costs-v2".to_string(),
         "bns".to_string(),
     ];
@@ -848,6 +849,11 @@ pub fn create_default_test_deployment(manifest_path: &PathBuf) -> Result<Deploym
     // settings.repl_settings = project_config.repl_settings.clone();
     // settings.disk_cache_enabled = true;
 
+    Ok(deployment)
+}
+
+pub fn create_default_test_deployment(manifest_path: &PathBuf) -> Result<DeploymentSpecification, String> {
+    let deployment = generate_default_deployment(&manifest_path, None)?;
     Ok(deployment)
 }
 
