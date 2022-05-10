@@ -421,12 +421,7 @@ pub fn main() {
 
                 let mut relative_path = PathBuf::from("deployments");
                 relative_path.push(default_deployment_path.file_name().unwrap());
-                println!(
-                    "{} {}.",
-                    green!("Generated file"),
-                    relative_path.display()
-                );
-
+                println!("{} {}.", green!("Generated file"), relative_path.display());
             }
         },
         Command::Contracts(subcommand) => match subcommand {
@@ -586,85 +581,34 @@ pub fn main() {
             let mut terminal = Terminal::load(session);
             terminal.start();
 
-            // let deployment_path = get_deployment_or_default_to_test(&manifest_path, cmd.deployment_plan_path);
+            // Report telemetry
+            let project_manifest = ProjectManifest::from_path(&manifest_path);
+            if project_manifest.project.telemetry {
+                #[cfg(feature = "telemetry")]
+                telemetry_report_event(DeveloperUsageEvent::PokeExecuted(
+                    DeveloperUsageDigest::new(
+                        &project_manifest.project.name,
+                        &project_manifest.project.authors,
+                    ),
+                ));
 
-            // let deployment = if fs::metadata(&deployment_path).is_err() {
-            //     println!("No deployment plan specified, and a default deployments/Test.yaml could not be found.");
-            //     println!("Do you want to generate a default plan?");
-
-            //     // Create and display a `deployments/test.yaml` file
-            //     let deployment = match create_default_test_deployment(&manifest_path) {
-            //         Ok(deployment) => deployment,
-            //         Err(message) => {
-            //             println!("{}", message);
-            //             std::process::exit(1);
-            //         }
-            //     };
-            //     display_deployment(&deployment);
-            //     println!("Do you want to save this deployment to disk and proceed with this deployment? Y/n");
-
-            //     write_deployment(&deployment, &deployment_path).expect("Unable to save deployment");
-
-            //     deployment
-            // } else {
-            //     let deployment = match load_deployment(&manifest_path, &deployment_path) {
-            //         Ok(deployment) => deployment,
-            //         Err(message) => {
-            //             println!("{}", message);
-            //             std::process::exit(1);
-            //         }
-            //     };
-
-            //     deployment
-            // };
-
-            // let session = terminal.session;
-
-            // let (session, output) = if start_repl {
-            //     let mut terminal = Terminal::new(settings.clone());
-            //     terminal.start();
-            //     (terminal.session.clone(), None)
-            // }
-
-            // let (session, project_manifest) =
-            //     match load_session_settings(&manifest_path, &StacksNetwork::Devnet) {
-            //         Ok((session, _, project_manifest, _)) => (Some(session), project_manifest),
-            //         Err((project_manifest, e)) => {
-            //             println!("{}: Unable to start REPL: {}", red!("error"), e);
-            //             (None, project_manifest)
-            //         }
-            //     };
-            // if hints_enabled {
-            //     display_post_console_hint();
-            // }
-            // if project_manifest.project.telemetry {
-            //     #[cfg(feature = "telemetry")]
-            //     telemetry_report_event(DeveloperUsageEvent::PokeExecuted(
-            //         DeveloperUsageDigest::new(
-            //             &project_manifest.project.name,
-            //             &project_manifest.project.authors,
-            //         ),
-            //     ));
-
-            //     #[cfg(feature = "telemetry")]
-            //     if let Some(session) = session {
-            //         let mut debug_count = 0;
-            //         for command in session.executed {
-            //             if command.starts_with("::debug") {
-            //                 debug_count += 1;
-            //             }
-            //         }
-            //         if debug_count > 0 {
-            //             telemetry_report_event(DeveloperUsageEvent::DebugStarted(
-            //                 DeveloperUsageDigest::new(
-            //                     &project_manifest.project.name,
-            //                     &project_manifest.project.authors,
-            //                 ),
-            //                 debug_count,
-            //             ));
-            //         }
-            //     }
-            // }
+                #[cfg(feature = "telemetry")]
+                let mut debug_count = 0;
+                for command in terminal.session.executed {
+                    if command.starts_with("::debug") {
+                        debug_count += 1;
+                    }
+                }
+                if debug_count > 0 {
+                    telemetry_report_event(DeveloperUsageEvent::DebugStarted(
+                        DeveloperUsageDigest::new(
+                            &project_manifest.project.name,
+                            &project_manifest.project.authors,
+                        ),
+                        debug_count,
+                    ));
+                }
+            }
         }
         Command::Check(cmd) if cmd.file.is_some() => {
             let file = cmd.file.unwrap();

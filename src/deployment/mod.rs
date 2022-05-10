@@ -532,20 +532,22 @@ pub fn write_deployment(
     target_path: &PathBuf,
     prompt_override: bool,
 ) -> Result<(), String> {
-
     if target_path.exists() && prompt_override {
-        println!("Deployment {} already exists.\nOverwrite [Y/n]?", target_path.display());
+        println!(
+            "Deployment {} already exists.\nOverwrite [Y/n]?",
+            target_path.display()
+        );
         let mut buffer = String::new();
         std::io::stdin().read_line(&mut buffer).unwrap();
         if buffer.starts_with("n") {
-            return Err(format!("deployment update aborted"))
+            return Err(format!("deployment update aborted"));
         }
     } else {
         let mut base_dir = target_path.clone();
         base_dir.pop();
         if !base_dir.exists() {
             let _ = std::fs::create_dir(base_dir);
-        }    
+        }
     }
 
     let file = deployment.to_specification_file();
