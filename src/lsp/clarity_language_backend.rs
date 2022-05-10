@@ -79,7 +79,7 @@ impl ClarityLanguageBackend {
             Err(message) => return Err((message, logs)),
             Ok(Some(clarinet_toml_path)) => {
                 // Read these 2 files and build a SessionSetting
-                match load_session_settings(&clarinet_toml_path, &StacksNetwork::Devnet) {
+                match load_session_settings(&clarinet_toml_path, &StacksNetwork::Devnet, true) {
                     Err(message) => return Err((message, logs)),
                     Ok((settings, _, _)) => settings,
                 }

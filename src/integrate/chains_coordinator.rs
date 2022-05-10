@@ -2,8 +2,8 @@ use super::DevnetEvent;
 use crate::indexer::{chains, Indexer, IndexerConfig};
 use crate::integrate::{MempoolAdmissionData, ServiceStatusData, Status};
 use crate::poke::load_session;
-use crate::deployment::publish_all_contracts;
-use crate::types::{self, DevnetConfig};
+use crate::deployment::{read_or_default_to_generated_deployment, apply_on_chain_deployment};
+use crate::types::{self, DevnetConfig, AccountConfig};
 use crate::types::{BitcoinChainEvent, ChainsCoordinatorCommand, StacksNetwork, StacksChainEvent};
 use crate::utils;
 use crate::utils::stacks::{transactions, PoxInfo, StacksRpc};
@@ -26,7 +26,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 use std::str;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex, RwLock};
 use tracing::info;
 
@@ -44,7 +44,7 @@ pub struct NewTransaction {
 #[derive(Clone, Debug)]
 pub struct StacksEventObserverConfig {
     pub devnet_config: DevnetConfig,
-    pub accounts: Vec<Account>,
+    pub accounts: Vec<AccountConfig>,
     pub contracts_to_deploy: VecDeque<InitialContract>,
     pub manifest_path: PathBuf,
     pub session: Session,
@@ -88,7 +88,7 @@ impl StacksEventObserverConfig {
 
         StacksEventObserverConfig {
             devnet_config,
-            accounts: session.settings.initial_accounts.clone(),
+            accounts: config.accounts.into_values().collect::<Vec<_>>(),
             manifest_path,
             contracts_to_deploy: VecDeque::from_iter(
                 session.settings.initial_contracts.iter().map(|c| c.clone()),
@@ -636,21 +636,19 @@ pub fn publish_initial_contracts(
 ) {
     let moved_manifest_path = manifest_path.clone();
     let moved_devnet_event_tx = devnet_event_tx.clone();
-    std::thread::spawn(move || {
-        let _ = publish_all_contracts(
-            &moved_manifest_path,
-            &StacksNetwork::Devnet,
-            false,
-            1,
-            Some(&moved_devnet_event_tx),
-            Some(chains_coordinator_commands_tx),
-        );
+    std::thread::spawn(|| {
+        let manifest_path = moved_manifest_path;
+        let deployment = read_or_default_to_generated_deployment(&manifest_path, &Some(StacksNetwork::Devnet)).unwrap();
+        let (event_tx, event_rx ) = channel();
+        let (command_tx, command_rx) = channel();
+
+        apply_on_chain_deployment(&manifest_path, &deployment, event_tx, command_rx);
     });
 }
 
 pub async fn publish_stacking_orders(
     devnet_config: &DevnetConfig,
-    accounts: &Vec<Account>,
+    accounts: &Vec<AccountConfig>,
     fee_rate: u64,
     bitcoin_block_height: u32,
 ) -> Option<usize> {
@@ -673,7 +671,7 @@ pub async fn publish_stacking_orders(
             let mut account = None;
             let mut accounts_iter = accounts.iter();
             while let Some(e) = accounts_iter.next() {
-                if e.name == pox_stacking_order.wallet {
+                if e.label == pox_stacking_order.wallet {
                     account = Some(e.clone());
                     break;
                 }

@@ -6,6 +6,7 @@ use std::path::PathBuf;
 pub fn load_session_settings(
     manifest_path: &PathBuf,
     env: &StacksNetwork,
+    include_requirements: bool,
 ) -> Result<(repl::SessionSettings, ChainConfig, ProjectManifest), String> {
     let mut settings = repl::SessionSettings::default();
 
@@ -44,8 +45,6 @@ pub fn load_session_settings(
             name: name.clone(),
             balance: account.balance,
             address: account.address.clone(),
-            mnemonic: account.mnemonic.clone(),
-            derivation: account.derivation.clone(),
         };
         if name == "deployer" {
             initial_deployer = Some(account.clone());
@@ -82,14 +81,7 @@ pub fn load_session_settings(
         Some(links) => links,
         None => vec![],
     };
-
-    for link_config in links.iter() {
-        settings.initial_links.push(repl::settings::InitialLink {
-            contract_id: link_config.contract_id.clone(),
-            stacks_node_addr: None,
-            cache: Some(project_config.project.cache_dir.clone()),
-        });
-    }
+    settings.disk_cache_enabled = true;
 
     settings.include_boot_contracts = vec![
         "pox".to_string(),
@@ -99,7 +91,6 @@ pub fn load_session_settings(
     ];
     settings.initial_deployer = initial_deployer;
     settings.repl_settings = project_config.repl_settings.clone();
-    settings.disk_cache_enabled = true;
 
     Ok((settings, chain_config, project_config))
 }
@@ -111,7 +102,7 @@ pub fn load_session(
 ) -> Result<(repl::Session, ChainConfig, ProjectManifest, Option<String>), (ProjectManifest, String)>
 {
     let (settings, chain_config, project_config) =
-        load_session_settings(manifest_path, env).expect("Unable to load manifest");
+        load_session_settings(manifest_path, env, true).expect("Unable to load manifest");
 
     let (session, output) = if start_repl {
         let mut terminal = Terminal::new(settings.clone());

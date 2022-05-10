@@ -3,7 +3,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::io::{prelude::*, BufReader, Read};
 use std::path::PathBuf;
 use std::{env, process};
-
+use std::sync::mpsc::channel;
 use crate::generate::{
     self,
     changes::{Changes, TOMLEdition},
@@ -11,10 +11,10 @@ use crate::generate::{
 use crate::integrate::{self, DevnetOrchestrator};
 use crate::lsp::run_lsp;
 use crate::poke::load_session;
-use crate::deployment::{publish_all_contracts, check_deployments};
+use crate::deployment::{check_deployments, apply_on_chain_deployment, read_or_default_to_generated_deployment, get_default_deployment_path, get_absolute_deployment_path};
 use crate::runnner::run_scripts;
 use crate::types::{StacksNetwork, ProjectManifest, ProjectManifestFile, RequirementConfig};
-use crate::deployment::{setup_session_from_deployment, load_deployment, create_default_test_deployment, display_deployment, write_deployment};
+use crate::deployment::{setup_session_from_deployment, load_deployment, create_default_test_deployment, generate_default_deployment, display_deployment, write_deployment};
 use clarity_repl::clarity::analysis::{AnalysisDatabase, ContractAnalysis};
 use clarity_repl::clarity::costs::LimitedCostTracker;
 use clarity_repl::clarity::types::QualifiedContractIdentifier;
@@ -91,6 +91,9 @@ enum Deployments {
     /// Check deployments format
     #[clap(name = "check", bin_name = "check")]
     CheckDeployments(CheckDeployments),
+    /// Generate new deployment
+    #[clap(name = "generate", bin_name = "generate")]
+    GenerateDeployment(GenerateDeployment),
 }
 
 #[derive(Parser, PartialEq, Clone, Debug)]
@@ -169,6 +172,45 @@ struct CheckDeployments {
 }
 
 #[derive(Parser, PartialEq, Clone, Debug)]
+struct GenerateDeployment {
+    /// Generate a deployment file for a test environment (console, tests, etc.)
+    #[clap(
+        long = "test",
+        conflicts_with = "devnet",
+        conflicts_with = "testnet",
+        conflicts_with = "mainnet"
+    )]    
+    pub test: bool,
+    /// Generate a deployment file for devnet, using settings/Devnet.toml
+    #[clap(
+        long = "devnet",
+        conflicts_with = "test",
+        conflicts_with = "testnet",
+        conflicts_with = "mainnet"
+    )]
+    pub devnet: bool,
+    /// Generate a deployment file for devnet, using settings/Testnet.toml
+    #[clap(
+        long = "testnet",
+        conflicts_with = "test",
+        conflicts_with = "devnet",
+        conflicts_with = "mainnet"
+    )]
+    pub testnet: bool,
+    /// Generate a deployment file for devnet, using settings/Mainnet.toml
+    #[clap(
+        long = "mainnet",
+        conflicts_with = "test",
+        conflicts_with = "testnet",
+        conflicts_with = "devnet"
+    )]
+    pub mainnet: bool,
+    /// Path to Clarinet.toml
+    #[clap(long = "manifest-path")]
+    pub manifest_path: Option<String>,
+}
+
+#[derive(Parser, PartialEq, Clone, Debug)]
 struct Console {
     /// Path to Clarinet.toml
     #[clap(long = "manifest-path")]
@@ -176,7 +218,6 @@ struct Console {
     /// Path to Clarinet.toml
     #[clap(long = "deployment-plan-path")]
     pub deployment_plan_path: Option<String>,
-    
 }
 
 #[derive(Parser, PartialEq, Clone, Debug)]
@@ -342,6 +383,32 @@ pub fn main() {
                 println!("Checking deployments");
                 check_deployments(&manifest_path);
             }
+            Deployments::GenerateDeployment(cmd) => {
+                let manifest_path = get_manifest_path_or_exit(cmd.manifest_path);
+
+                let network = if cmd.devnet == true {
+                    Some(StacksNetwork::Devnet)
+                } else if cmd.testnet == true {
+                    Some(StacksNetwork::Testnet)
+                } else if cmd.mainnet == true {
+                    Some(StacksNetwork::Mainnet)
+                } else {
+                    None
+                };
+
+                let default_deployment_path = get_default_deployment_path(&manifest_path, &network);
+
+                println!("Generating deployment file");
+                let deployment = match generate_default_deployment(&manifest_path, &network) {
+                    Ok(deployment) => deployment,
+                    Err(message) => {
+                        println!("{}", red!(message));
+                        std::process::exit(1);
+                    }
+                };
+                write_deployment(&deployment, &default_deployment_path).expect("Unable to save deployment");   
+            }
+
         },
         Command::Contracts(subcommand) => match subcommand {
             Contracts::NewContract(new_contract) => {
@@ -393,47 +460,47 @@ pub fn main() {
                 let settings = repl::SessionSettings::default();
                 let mut session = repl::Session::new(settings);
 
-                let mut resolved = BTreeSet::new();
-                let res = session.resolve_link(
-                    &repl::settings::InitialLink {
-                        contract_id: fork_contract.contract_id.clone(),
-                        stacks_node_addr: None,
-                        cache: None,
-                    },
-                    &mut resolved,
-                );
-                let contracts = res.unwrap();
-                let mut changes = vec![];
-                for (contract_id, code, deps) in contracts.into_iter() {
-                    let components: Vec<&str> = contract_id.split('.').collect();
-                    let contract_name = components.last().unwrap();
+                // let mut resolved = BTreeSet::new();
+                // let res = session.resolve_link(
+                //     &repl::settings::InitialLink {
+                //         contract_id: fork_contract.contract_id.clone(),
+                //         stacks_node_addr: None,
+                //         cache: None,
+                //     },
+                //     &mut resolved,
+                // );
+                // let contracts = res.unwrap();
+                // let mut changes = vec![];
+                // for (contract_id, code, deps) in contracts.into_iter() {
+                //     let components: Vec<&str> = contract_id.split('.').collect();
+                //     let contract_name = components.last().unwrap();
 
-                    if &contract_id == &fork_contract.contract_id {
-                        let mut change_set = generate::get_changes_for_new_contract(
-                            manifest_path.clone(),
-                            contract_name.to_string(),
-                            Some(code),
-                            false,
-                            vec![],
-                        );
-                        changes.append(&mut change_set);
+                //     if &contract_id == &fork_contract.contract_id {
+                //         let mut change_set = generate::get_changes_for_new_contract(
+                //             manifest_path.clone(),
+                //             contract_name.to_string(),
+                //             Some(code),
+                //             false,
+                //             vec![],
+                //         );
+                //         changes.append(&mut change_set);
 
-                        for dep in deps.iter() {
-                            let mut change_set = generate::get_changes_for_new_link(
-                                manifest_path.clone(),
-                                dep.clone(),
-                                None,
-                            );
-                            changes.append(&mut change_set);
-                        }
-                    }
-                }
-                if !execute_changes(changes) {
-                    std::process::exit(1);
-                }
-                if hints_enabled {
-                    display_post_check_hint();
-                }
+                //         for dep in deps.iter() {
+                //             let mut change_set = generate::get_changes_for_new_link(
+                //                 manifest_path.clone(),
+                //                 dep.clone(),
+                //                 None,
+                //             );
+                //             changes.append(&mut change_set);
+                //         }
+                //     }
+                // }
+                // if !execute_changes(changes) {
+                //     std::process::exit(1);
+                // }
+                // if hints_enabled {
+                //     display_post_check_hint();
+                // }
             }
             Contracts::Publish(deploy) => {
                 let manifest_path = get_manifest_path_or_exit(deploy.manifest_path);
@@ -449,17 +516,14 @@ pub fn main() {
                         "Target deployment must be specified with --devnet, --testnet or --mainnet"
                     )
                 };
-                let project_manifest =
-                    match publish_all_contracts(&manifest_path, &network, true, 30, None, None) {
-                        Ok((results, project_manifest)) => {
-                            println!("{}", results.join("\n"));
-                            project_manifest
-                        }
-                        Err(results) => {
-                            println!("{}", results.join("\n"));
-                            return;
-                        }
-                    };
+
+                let deployment = read_or_default_to_generated_deployment(&manifest_path, &Some(network.clone())).unwrap();
+                let (event_tx, event_rx) = channel();
+                let (command_tx, command_rx) = channel();
+
+                apply_on_chain_deployment(&manifest_path, &deployment, event_tx, command_rx);
+
+                let project_manifest = ProjectManifest::from_path(&manifest_path);
                 if project_manifest.project.telemetry {
                     #[cfg(feature = "telemetry")]
                     telemetry_report_event(DeveloperUsageEvent::ContractPublished(
@@ -474,37 +538,17 @@ pub fn main() {
         },
         Command::Console(cmd) => {
             let manifest_path = get_manifest_path_or_exit(cmd.manifest_path);
+            let res = match cmd.deployment_plan_path {
+                None => generate_default_deployment(&manifest_path, &None),
+                Some(path) => load_deployment(&manifest_path, &get_absolute_deployment_path(&manifest_path, &path))
+            };
 
-            let deployment_path = get_deployment_or_default_to_test(&manifest_path, cmd.deployment_plan_path);
-
-            let deployment = if fs::metadata(&deployment_path).is_err() {
-                println!("No deployment plan specified, and a default deployments/test.yaml could not be found.");
-                println!("Do you want to generate a default plan?");
-                
-                // Create and display a `deployments/test.yaml` file
-                let deployment = match create_default_test_deployment(&manifest_path) {
-                    Ok(deployment) => deployment,
-                    Err(message) => {
-                        println!("{}", message);
-                        std::process::exit(1);
-                    }
-                };
-                display_deployment(&deployment);
-                println!("Do you want to save this deployment to disk and proceed with this deployment? Y/n");
-                
-                write_deployment(&deployment, &deployment_path).expect("Unable to save deployment");   
-                
-                deployment
-            } else {
-                let deployment = match load_deployment(&manifest_path, &deployment_path) {
-                    Ok(deployment) => deployment,
-                    Err(message) => {
-                        println!("{}", message);
-                        std::process::exit(1);
-                    }
-                };
-    
-                deployment
+            let deployment = match res {
+                Ok(deployment) => deployment,
+                Err(e) => {
+                    println!("error: {}", e);
+                    process::exit(1);
+                }
             };
 
             let session = match setup_session_from_deployment(&deployment) {
@@ -517,6 +561,40 @@ pub fn main() {
         
             let mut terminal = Terminal::load(session);
             terminal.start();
+
+
+
+                        // let deployment_path = get_deployment_or_default_to_test(&manifest_path, cmd.deployment_plan_path);
+
+            // let deployment = if fs::metadata(&deployment_path).is_err() {
+            //     println!("No deployment plan specified, and a default deployments/Test.yaml could not be found.");
+            //     println!("Do you want to generate a default plan?");
+                
+            //     // Create and display a `deployments/test.yaml` file
+            //     let deployment = match create_default_test_deployment(&manifest_path) {
+            //         Ok(deployment) => deployment,
+            //         Err(message) => {
+            //             println!("{}", message);
+            //             std::process::exit(1);
+            //         }
+            //     };
+            //     display_deployment(&deployment);
+            //     println!("Do you want to save this deployment to disk and proceed with this deployment? Y/n");
+                
+            //     write_deployment(&deployment, &deployment_path).expect("Unable to save deployment");   
+                
+            //     deployment
+            // } else {
+            //     let deployment = match load_deployment(&manifest_path, &deployment_path) {
+            //         Ok(deployment) => deployment,
+            //         Err(message) => {
+            //             println!("{}", message);
+            //             std::process::exit(1);
+            //         }
+            //     };
+    
+            //     deployment
+            // };
 
             // let session = terminal.session;
 
@@ -801,19 +879,6 @@ fn get_manifest_path_or_exit(path: Option<String>) -> PathBuf {
             process::exit(1);
         }
     }
-}
-
-fn get_deployment_or_default_to_test(manifest_path: &PathBuf, path: Option<String>) -> PathBuf {
-    let mut deployment_path = manifest_path.clone();
-    deployment_path.pop();
-    match path {
-        Some(path) => deployment_path.push(path),
-        None => {
-            deployment_path.push("deployments");
-            deployment_path.push("test.yaml");
-        }
-    }
-    deployment_path
 }
 
 fn execute_changes(changes: Vec<Changes>) -> bool {

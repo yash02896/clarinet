@@ -159,6 +159,7 @@ pub struct PoxStackingOrder {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct AccountConfig {
+    pub label: String,
     pub mnemonic: String,
     pub derivation: String,
     pub balance: u64,
@@ -167,6 +168,24 @@ pub struct AccountConfig {
 }
 
 impl ChainConfig {
+
+    #[allow(non_fmt_panics)]
+    pub fn from_manifest_path(manifest_path: &PathBuf, network: &Option<StacksNetwork>) -> ChainConfig {
+        let mut chain_config_path = manifest_path.clone();
+        chain_config_path.pop();
+        chain_config_path.push("settings");
+        chain_config_path.push(match network {
+            None | Some(StacksNetwork::Devnet) => "Devnet.toml",
+            Some(StacksNetwork::Testnet) => "Testnet.toml",
+            Some(StacksNetwork::Mainnet) => "Mainnet.toml",
+        });
+        let chain_config = ChainConfig::from_path(&chain_config_path, match network {
+            None => &StacksNetwork::Devnet,
+            Some(ref network) => network,
+        });
+        chain_config
+    }
+
     #[allow(non_fmt_panics)]
     pub fn from_path(path: &PathBuf, network: &StacksNetwork) -> ChainConfig {
         let path = match File::open(path) {
@@ -237,6 +256,7 @@ impl ChainConfig {
                             accounts.insert(
                                 account_name.to_string(),
                                 AccountConfig {
+                                    label: account_name.to_string(),
                                     mnemonic: mnemonic.to_string(),
                                     derivation,
                                     balance,

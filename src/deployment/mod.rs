@@ -1,5 +1,6 @@
 mod ui;
 mod types;
+mod requirements;
 
 use clarity_repl::clarity::types::{StandardPrincipalData, PrincipalData, QualifiedContractIdentifier};
 use clarity_repl::clarity::{ClarityName, ContractName};
@@ -7,7 +8,7 @@ use self::types::{DeploymentSpecification, TransactionPlanSpecificationFile, Con
 use crate::deployment::types::{DeploymentSpecificationFile, TransactionsBatchSpecificationFile, TransactionSpecificationFile, TransactionSpecification};
 use crate::integrate::DevnetEvent;
 use crate::poke::{load_session, load_session_settings};
-use crate::types::{ChainsCoordinatorCommand, StacksNetwork, ProjectManifest, ChainConfig};
+use crate::types::{ChainsCoordinatorCommand, StacksNetwork, ProjectManifest, ChainConfig, AccountConfig};
 use crate::utils::mnemonic;
 use crate::utils::stacks::StacksRpc;
 use clarity_repl::clarity::codec::transaction::{
@@ -15,6 +16,7 @@ use clarity_repl::clarity::codec::transaction::{
     TransactionPayload, TransactionPostConditionMode, TransactionPublicKeyEncoding,
     TransactionSmartContract, TransactionSpendingCondition,
 };
+use clarity_repl::clarity::ast::ContractAST;
 use clarity_repl::clarity::codec::StacksMessageCodec;
 use clarity_repl::clarity::util::{
     C32_ADDRESS_VERSION_MAINNET_SINGLESIG, C32_ADDRESS_VERSION_TESTNET_SINGLESIG,
@@ -32,17 +34,21 @@ use clarity_repl::clarity::{
         StacksAddress,
     },
 };
+use clarity_repl::repl::SessionSettings;
+use clarity_repl::analysis::ast_dependency_detector::ASTDependencyDetector;
 use clarity_repl::repl::Session;
-use clarity_repl::repl::settings::{Account, InitialContract};
+use clarity_repl::repl::settings::{InitialContract};
 use libsecp256k1::{PublicKey, SecretKey};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::mpsc::channel;
-use std::sync::mpsc::Sender;
+use std::str::FromStr;
+use std::sync::mpsc::{channel, Sender, Receiver};
 use std::fs::{self, File};
 use std::io::Write;
 use tiny_hderive::bip32::ExtendedPrivKey;
 use serde_yaml;
+use std::collections::VecDeque;
+use crate::deployment::types::ContractPublishSpecification;
 
 #[derive(Deserialize, Debug)]
 pub struct Balance {
@@ -73,18 +79,28 @@ pub enum ContractStatus {
     Error,
 }
 
-pub fn endode_contract(
-    contract: &InitialContract,
-    account: &Account,
+pub fn encode_contract_call(
+    contract_name: &ContractName,
+    source: &str,
     nonce: u64,
     deployment_fee_rate: u64,
     network: &StacksNetwork,
 ) -> Result<(StacksTransaction, StacksAddress), String> {
-    let contract_name = contract.name.clone().unwrap();
+    Err(format!("unimplemented"))
+}
+
+pub fn encode_contract_publish(
+    contract_name: &ContractName,
+    source: &str,
+    account: &AccountConfig,
+    nonce: u64,
+    deployment_fee_rate: u64,
+    network: &StacksNetwork,
+) -> Result<StacksTransaction, String> {
 
     let payload = TransactionSmartContract {
-        name: contract_name.as_str().into(),
-        code_body: StacksString::from_string(&contract.code).unwrap(),
+        name: contract_name.clone(),
+        code_body: StacksString::from_str(source).unwrap(),
     };
 
     let bip39_seed = match mnemonic::get_bip39_seed_from_mnemonic(&account.mnemonic, "") {
@@ -100,7 +116,7 @@ pub fn endode_contract(
     let wrapped_secret_key = Secp256k1PrivateKey::from_slice(&ext.secret()).unwrap();
 
     let anchor_mode = TransactionAnchorMode::OnChainOnly;
-    let tx_fee = deployment_fee_rate * contract.code.len() as u64;
+    let tx_fee = deployment_fee_rate * source.len() as u64;
 
     let signer_addr = StacksAddress::from_public_keys(
         match network {
@@ -148,299 +164,7 @@ pub fn endode_contract(
     tx_signer.sign_origin(&wrapped_secret_key).unwrap();
     let signed_tx = tx_signer.get_tx().unwrap();
 
-    Ok((signed_tx, signer_addr))
-}
-
-#[allow(dead_code)]
-pub fn publish_contract(
-    contract: &InitialContract,
-    deployers_lookup: &HashMap<String, Account>,
-    deployers_nonces: &mut HashMap<String, u64>,
-    node_url: &str,
-    deployment_fee_rate: u64,
-    network: &StacksNetwork,
-) -> Result<(String, u64, String, String), String> {
-    let contract_name = contract.name.clone().unwrap();
-
-    let stacks_rpc = StacksRpc::new(&node_url);
-
-    let deployer = match deployers_lookup.get(&contract_name) {
-        Some(deployer) => deployer,
-        None => deployers_lookup.get("*").unwrap(),
-    };
-
-    let nonce = match deployers_nonces.get(&deployer.name) {
-        Some(nonce) => *nonce,
-        None => {
-            let nonce = stacks_rpc
-                .get_nonce(&deployer.address)
-                .expect("Unable to retrieve account");
-            deployers_nonces.insert(deployer.name.clone(), nonce);
-            nonce
-        }
-    };
-
-    let (signed_tx, signer_addr) =
-        endode_contract(contract, deployer, nonce, deployment_fee_rate, network)?;
-    let txid = match stacks_rpc.post_transaction(signed_tx) {
-        Ok(res) => res.txid,
-        Err(e) => return Err(format!("{:?}", e)),
-    };
-    deployers_nonces.insert(deployer.name.clone(), nonce + 1);
-    Ok((txid, nonce, signer_addr.to_string(), contract_name))
-}
-
-/// publish_all_contracts publish all the contracts referenced by the manifest passed.
-/// this method is being used by developers
-pub fn publish_all_contracts(
-    manifest_path: &PathBuf,
-    network: &StacksNetwork,
-    analysis_enabled: bool,
-    delay_between_checks: u32,
-    devnet_event_tx: Option<&Sender<DevnetEvent>>,
-    chains_coordinator_commands_tx: Option<Sender<ChainsCoordinatorCommand>>,
-) -> Result<(Vec<String>, ProjectManifest), Vec<String>> {
-    let (settings, chain, project_manifest) = if analysis_enabled {
-        let start_repl = false;
-        let (session, chain, project_manifest, output) =
-            match load_session(manifest_path, start_repl, &network) {
-                Ok((session, chain, project_manifest, output)) => {
-                    (session, chain, project_manifest, output)
-                }
-                Err((_, e)) => return Err(vec![e]),
-            };
-
-        if let Some(message) = output {
-            println!("{}", message);
-            println!("{}", yellow!("Would you like to continue [Y/n]:"));
-            let mut buffer = String::new();
-            std::io::stdin().read_line(&mut buffer).unwrap();
-            if buffer == "n\n" {
-                println!("{}", red!("Contracts deployment aborted"));
-                std::process::exit(1);
-            }
-        }
-        (session.settings, chain, project_manifest)
-    } else {
-        let (settings, chain, project_manifest) =
-            match load_session_settings(manifest_path, &network) {
-                Ok((session, chain, project_manifest)) => (session, chain, project_manifest),
-                Err(e) => return Err(vec![e]),
-            };
-        (settings, chain, project_manifest)
-    };
-
-    let (tx, rx) = channel();
-    let (per_contract_event_tx, per_contract_event_rx) = channel();
-
-    let contracts_to_deploy = settings.initial_contracts.len();
-    let node_url = settings.node.clone();
-
-    // Approach's description: after getting all the contracts indexed by the manifest, we build a
-    // a sorted set that we will be splitting in batches of 25 contracts, which is the number of
-    // transactions that you can have for one user at a given time in a mempool.
-    // We then keep fetching the stacks-node every `delay_between_checks` seconds and wait for
-    // all the contracts to be published, and then move on to the next batch.
-    // We're using a channel here because this routine can be used in 2 different contexts:
-    // - clarinet contracts publish: display a UI that let developers tracking the progress
-    // - clarinet integrate / orchestra: nothing displayed, but the events are being used
-    // for coordinating the chains setup.
-    let per_contract_event_tx_moved = per_contract_event_tx.clone();
-    let deploying_thread_handle = std::thread::spawn(move || {
-        let mut total_contracts_deployed = 0;
-        let stacks_rpc = StacksRpc::new(&node_url);
-
-        while contracts_to_deploy != total_contracts_deployed {
-            let mut current_block_height = 0;
-            let mut contracts_batch: Vec<(StacksTransaction, StacksAddress, String)> =
-                rx.recv().unwrap();
-            let mut batch_deployed = false;
-            let mut contracts_being_deployed: BTreeMap<(String, String), bool> = BTreeMap::new();
-            loop {
-                let new_block_height = match stacks_rpc.get_info() {
-                    Ok(info) => info.burn_block_height,
-                    _ => {
-                        std::thread::sleep(std::time::Duration::from_secs(
-                            delay_between_checks.into(),
-                        ));
-                        continue;
-                    }
-                };
-
-                if new_block_height <= current_block_height {
-                    std::thread::sleep(std::time::Duration::from_secs(delay_between_checks.into()));
-                    continue;
-                }
-
-                current_block_height = new_block_height;
-
-                if !batch_deployed {
-                    batch_deployed = true;
-                    for (tx, deployer, contract_name) in contracts_batch.drain(..) {
-                        let _ = match stacks_rpc.post_transaction(tx) {
-                            Ok(res) => {
-                                let _ = per_contract_event_tx_moved.send(
-                                    PublishUpdate::ContractUpdate(ContractUpdate {
-                                        contract_id: format!("{}.{}", deployer, contract_name),
-                                        status: ContractStatus::Broadcasted,
-                                        comment: Some(format!(
-                                            "Contract broadcasted: {}",
-                                            res.txid.clone()
-                                        )),
-                                    }),
-                                );
-                                contracts_being_deployed
-                                    .insert((deployer.to_string(), contract_name), true);
-                                res.txid
-                            }
-                            Err(e) => {
-                                let _ = per_contract_event_tx_moved.send(
-                                    PublishUpdate::ContractUpdate(ContractUpdate {
-                                        contract_id: format!("{}.{}", deployer, contract_name),
-                                        status: ContractStatus::Error,
-                                        comment: Some(format!("Broadcast error: {:?}", e)),
-                                    }),
-                                );
-                                std::process::exit(1);
-                            }
-                        };
-                    }
-                    std::thread::sleep(std::time::Duration::from_secs(delay_between_checks.into()));
-                    continue;
-                }
-
-                let mut keep_looping = false;
-
-                for ((deployer, contract_name), value) in contracts_being_deployed.iter_mut() {
-                    if *value {
-                        let res = stacks_rpc.get_contract_source(&deployer, &contract_name);
-                        if let Ok(_contract) = res {
-                            *value = false;
-                            total_contracts_deployed += 1;
-                            let _ = per_contract_event_tx_moved.send(
-                                PublishUpdate::ContractUpdate(ContractUpdate {
-                                    contract_id: format!("{}.{}", deployer, contract_name),
-                                    status: ContractStatus::Published,
-                                    comment: None,
-                                }),
-                            );
-                        } else {
-                            keep_looping = true;
-                            break;
-                        }
-                    }
-                }
-
-                if !keep_looping {
-                    break;
-                }
-            }
-        }
-        let _ = per_contract_event_tx_moved.send(PublishUpdate::Completed);
-    });
-
-    let results = vec![];
-    let mut deployers_nonces = HashMap::new();
-    let mut deployers_lookup: HashMap<String, Account> = HashMap::new();
-
-    for account in settings.initial_accounts.iter() {
-        deployers_lookup.insert(account.name.to_string(), account.clone());
-        if account.name == "deployer" {
-            deployers_lookup.insert("*".into(), account.clone());
-        }
-        // Let's avoid fetching nonces in the case of initial Devnet setup.
-        if devnet_event_tx.is_some() {
-            deployers_nonces.insert(account.name.clone(), 0);
-        }
-    }
-
-    let node_url = settings.node.clone();
-    let stacks_rpc = StacksRpc::new(&node_url);
-
-    for batch in settings.initial_contracts.chunks(25) {
-        let mut encoded_contracts = vec![];
-
-        for contract in batch.iter() {
-            let contract_name = contract.name.clone().unwrap();
-
-            let deployer = match deployers_lookup.get(&contract_name) {
-                Some(deployer) => deployer,
-                None => deployers_lookup.get("*").unwrap(),
-            };
-
-            let nonce = match deployers_nonces.get(&deployer.name) {
-                Some(nonce) => *nonce,
-                None => {
-                    let nonce = stacks_rpc
-                        .get_nonce(&deployer.address)
-                        .expect("Unable to retrieve account");
-                    deployers_nonces.insert(deployer.name.clone(), nonce);
-                    nonce
-                }
-            };
-
-            let (signed_tx, signer_addr) = endode_contract(
-                contract,
-                deployer,
-                nonce,
-                chain.network.deployment_fee_rate,
-                network,
-            )
-            .expect("Unable to encode contract");
-
-            let _ = per_contract_event_tx.send(PublishUpdate::ContractUpdate(ContractUpdate {
-                contract_id: format!("{}.{}", deployer.address, contract_name),
-                status: ContractStatus::Encoded,
-                comment: Some(format!("Contract encoded and queued")),
-            }));
-
-            encoded_contracts.push((signed_tx, signer_addr, contract_name));
-            deployers_nonces.insert(deployer.name.clone(), nonce + 1);
-        }
-
-        let _ = tx.send(encoded_contracts);
-    }
-
-    if devnet_event_tx.is_none() {
-        let mut contracts = Vec::new();
-        for contract in settings.initial_contracts.iter() {
-            let deployer = {
-                let deployer = contract.deployer.clone().unwrap_or("deployer".to_string());
-                match deployers_lookup.get(&deployer) {
-                    Some(deployer) => deployer,
-                    None => deployers_lookup.get("*").unwrap(),
-                }
-            };
-            contracts.push((deployer.address.to_string(), contract.name.clone().unwrap()));
-        }
-
-        ctrlc::set_handler(move || {
-            let _ = per_contract_event_tx.send(PublishUpdate::Completed);
-        })
-        .expect("Error setting Ctrl-C handler");
-
-        let _ = ui::start_ui(&node_url, per_contract_event_rx, contracts);
-    } else {
-        let _ = deploying_thread_handle.join();
-    }
-
-    // TODO(lgalabru): if devnet, we should be pulling all the links.
-
-    if let Some(chains_coordinator_commands_tx) = chains_coordinator_commands_tx {
-        let _ = chains_coordinator_commands_tx.send(ChainsCoordinatorCommand::ProtocolDeployed);
-    }
-
-    if let Some(devnet_event_tx) = devnet_event_tx {
-        let _ = devnet_event_tx.send(DevnetEvent::ProtocolDeployed);
-    } else {
-        println!(
-            "{} Contracts successfully deployed on {:?}",
-            green!("✔"),
-            network
-        );
-    }
-
-    Ok((results, project_manifest))
+    Ok(signed_tx)
 }
 
 pub fn setup_session_from_deployment(deployment: &DeploymentSpecification) -> Result<Session, String> {
@@ -449,36 +173,6 @@ pub fn setup_session_from_deployment(deployment: &DeploymentSpecification) -> Re
 
     let mut settings = SessionSettings::default();
     let mut session = Session::new(settings);
-
-    // let mut project_path = manifest_path.clone();
-    // project_path.pop();
-
-    // let mut chain_config_path = project_path.clone();
-    // // chain_config_path.pop();
-    // chain_config_path.push("settings");
-
-    // chain_config_path.push(match env {
-    //     StacksNetwork::Devnet => "Devnet.toml",
-    //     StacksNetwork::Testnet => "Testnet.toml",
-    //     StacksNetwork::Mainnet => "Mainnet.toml",
-    // });
-
-    // let mut project_config = ProjectManifest::from_path(&manifest_path);
-    // let chain_config = ChainConfig::from_path(&chain_config_path, env);
-
-    // let mut deployer_address = None;
-    // let mut initial_deployer = None;
-
-    // settings.node = chain_config
-    //     .network
-    //     .node_rpc_address
-    //     .clone()
-    //     .take()
-    //     .unwrap_or(match env {
-    //         StacksNetwork::Devnet => "http://127.0.0.1:20443".into(),
-    //         StacksNetwork::Testnet => "https://stacks-node-api.testnet.stacks.co".into(),
-    //         StacksNetwork::Mainnet => "https://stacks-node-api.mainnet.stacks.co".into(),
-    //     });
 
     // settings.include_boot_contracts = vec![
     //     "pox".to_string(),
@@ -515,68 +209,202 @@ pub fn setup_session_from_deployment(deployment: &DeploymentSpecification) -> Re
     }
 
     Ok(session)
-    // for (name, account) in deployment..accounts.iter() {
-    //     let account = repl::settings::Account {
-    //         name: name.clone(),
-    //         balance: account.balance,
-    //         address: account.address.clone(),
-    //         mnemonic: account.mnemonic.clone(),
-    //         derivation: account.derivation.clone(),
-    //     };
-    //     if name == "deployer" {
-    //         initial_deployer = Some(account.clone());
-    //         deployer_address = Some(account.address.clone());
-    //     }
-    //     settings.initial_accounts.push(account);
+}
+
+pub fn get_absolute_deployment_path(manifest_path: &PathBuf, relative_deployment_path: &str) -> PathBuf {
+    let mut base_path = manifest_path.clone();
+    base_path.pop();
+    let path = match PathBuf::from_str(relative_deployment_path) {
+        Ok(path) => path,
+        Err(e) => {
+            println!("unable to read path {}", relative_deployment_path);
+            std::process::exit(1);
+        }
+    };
+    base_path.join(path)
+}
+
+pub fn get_default_deployment_path(manifest_path: &PathBuf, network: &Option<StacksNetwork>) -> PathBuf {
+    let mut deployment_path = manifest_path.clone();
+    deployment_path.pop();
+    deployment_path.push("deployments");
+    let file_path = match network {
+        None => "Test.yaml",
+        Some(StacksNetwork::Devnet) => "Devnet.yaml",
+        Some(StacksNetwork::Testnet) => "Testnet.yaml",
+        Some(StacksNetwork::Mainnet) => "Mainnet.yaml",
+    };
+    deployment_path.push(file_path);
+    deployment_path
+}
+
+pub fn read_or_default_to_generated_deployment(manifest_path: &PathBuf, network: &Option<StacksNetwork>) -> Result<DeploymentSpecification, String> {
+    let default_deployment_file_path = get_default_deployment_path(manifest_path, network);
+    let deployment = if default_deployment_file_path.exists() {
+        load_deployment(manifest_path, &default_deployment_file_path)?
+    } else {
+        generate_default_deployment(manifest_path, network)?
+    };
+    Ok(deployment)
+}
+
+pub enum DeploymentEvent {
+    Interrupted(String),
+}
+
+pub enum DeploymentCommand {
+    Start,
+}
+
+pub enum TransactionStatus {
+    Encoded,
+    Broadcasted,
+    OnChain,
+}
+
+pub fn apply_on_chain_deployment(manifest_path: &PathBuf, deployment: &DeploymentSpecification, deployment_event_tx: Sender<DeploymentEvent>, deployment_command_rx: Receiver<DeploymentCommand>) {
+
+    let chain_config = ChainConfig::from_manifest_path(&manifest_path, &deployment.network);
+    let delay_between_checks: u64 = 10;
+    // Load deployers, deployment_fee_rate
+    // Check fee, balances and deployers
+
+    let mut batches = VecDeque::new();
+    let network = deployment.network.clone().expect("unable to retrieve network");
+    let deployment_fee_rate = chain_config.network.deployment_fee_rate;
+    let mut accounts_cached_nonces: BTreeMap<String, u64> = BTreeMap::new();
+    let mut accounts_lookup: BTreeMap<String, &AccountConfig> = BTreeMap::new();
+
+    if network == StacksNetwork::Devnet {
+        for (_, account) in chain_config.accounts.iter() {
+            accounts_cached_nonces.insert(account.address.clone(), 0);
+        }
+    }
+
+    for (_, account) in chain_config.accounts.iter() {
+        accounts_lookup.insert(account.address.clone(), account);
+    }
+
+    let node_url = chain_config.network.node_rpc_address.clone().unwrap();
+    let stacks_rpc = StacksRpc::new(&node_url);
+
+    // Phase 1: we traverse the deployment plan and encode all the transactions,
+    // keeping the order.
+    for batch_spec in deployment.plan.batches.iter() {
+        
+        let mut batch = Vec::new();
+        for transaction in batch_spec.transactions.iter() {
+            match transaction {
+                TransactionSpecification::ContractCall(tx) => {
+                    // Retrieve nonce for issuer
+                    unimplemented!();
+                }
+                TransactionSpecification::ContractPublish(tx) => {
+                    // Retrieve nonce for issuer
+                    let issuer_address = tx.expected_sender.to_address();
+                    let nonce = match accounts_cached_nonces.get(&issuer_address) {
+                        Some(cached_nonce) => cached_nonce.clone(),
+                        None => {
+                            stacks_rpc
+                                .get_nonce(&issuer_address)
+                                .expect("Unable to retrieve account")
+                        }
+                    };
+                    let account = accounts_lookup.get(&issuer_address).unwrap();
+                    
+                    let stacks_transaction = match encode_contract_publish(&tx.contract, &tx.source, *account, nonce, deployment_fee_rate, &network) {
+                        Ok(res) => res,
+                        Err(e) => {
+                            let _ = deployment_event_tx.send(DeploymentEvent::Interrupted(e));
+                            return
+                        }
+                    };
+
+                    accounts_cached_nonces.insert(issuer_address.clone(), nonce + 1);
+                    batch.push((tx.expected_sender.clone(), tx.contract.clone(), stacks_transaction, TransactionStatus::Encoded));
+                }
+                TransactionSpecification::EmulatedContractPublish(_) | TransactionSpecification::EmulatedContractCall(_) => {}
+            }
+        }
+
+        batches.push_back(batch);
+    }
+
+    let _cmd = match deployment_command_rx.recv() {
+        Ok(cmd) => cmd,
+        Err(_) => {
+            let _ = deployment_event_tx.send(DeploymentEvent::Interrupted("deployment aborted - broken channel".to_string()));
+            return
+        }
+    };
+
+    // Phase 2: we submit all the transactions previously encoded,
+    // and wait for their inclusion in a block before moving to the next batch.
+    let mut current_block_height = 0;
+    for batch in batches.into_iter() {
+        let mut ongoing_batch = BTreeMap::new();
+        for (sender, contract_name, tx, status) in batch.into_iter() {
+            let _ = match stacks_rpc.post_transaction(tx) {
+                Ok(res) => {
+                    ongoing_batch.insert(res.txid, (sender, contract_name, TransactionStatus::Broadcasted));
+                }
+                Err(e) => {
+                    return
+                }
+            };
+        }
+
+        loop {
+            let new_block_height = match stacks_rpc.get_info() {
+                Ok(info) => info.burn_block_height,
+                _ => {
+                    std::thread::sleep(std::time::Duration::from_secs(
+                        delay_between_checks.into(),
+                    ));
+                    continue;
+                }
+            };
+
+            // If no block has been mined since `delay_between_checks`, 
+            // avoid flooding the stacks-node with status update requests. 
+            if new_block_height <= current_block_height {
+                std::thread::sleep(std::time::Duration::from_secs(delay_between_checks.into()));
+                continue;
+            }
+
+            current_block_height = new_block_height;
+
+            let mut keep_looping = false;
+
+            for (txid, (deployer, contract_name, status)) in ongoing_batch.iter_mut() {
+                match *status {
+                    TransactionStatus::Broadcasted => {
+                        let res = stacks_rpc.get_contract_source(&deployer.to_address(), &contract_name);
+                        if let Ok(_contract) = res {
+                            *status = TransactionStatus::OnChain;
+                        } else {
+                            keep_looping = true;
+                            break;
+                        }    
+                    }
+                    _ => {}            
+                }
+            }
+            if !keep_looping {
+                break;
+            }
+        }
+    }
+    
+    // if let Some(devnet_event_tx) = devnet_event_tx {
+    //     let _ = devnet_event_tx.send(DevnetEvent::ProtocolDeployed);
+    // } else {
+    //     println!(
+    //         "{} Contracts successfully deployed on {:?}",
+    //         green!("✔"),
+    //         network
+    //     );
     // }
-
-    // for name in project_config.ordered_contracts().iter() {
-    //     let config = project_config.contracts.get(name).unwrap();
-    //     let mut contract_path = project_path.clone();
-    //     contract_path.push(&config.path);
-
-    //     let code = match fs::read_to_string(&contract_path) {
-    //         Ok(code) => code,
-    //         Err(err) => {
-    //             return Err(format!(
-    //                 "Error: unable to read {:?}: {}",
-    //                 contract_path, err
-    //             ))
-    //         }
-    //     };
-
-    //     settings
-    //         .initial_contracts
-    //         .push(repl::settings::InitialContract {
-    //             code: code,
-    //             path: contract_path.to_str().unwrap().into(),
-    //             name: Some(name.clone()),
-    //             deployer: deployer_address.clone(),
-    //         });
-    // }
-
-    // let links = match project_config.project.requirements.take() {
-    //     Some(links) => links,
-    //     None => vec![],
-    // };
-
-    // for link_config in links.iter() {
-    //     settings.initial_links.push(repl::settings::InitialLink {
-    //         contract_id: link_config.contract_id.clone(),
-    //         stacks_node_addr: None,
-    //         cache: Some(project_config.project.cache_dir.clone()),
-    //     });
-    // }
-
-    // settings.include_boot_contracts = vec![
-    //     "pox".to_string(),
-    //     "costs-v1".to_string(),
-    //     "costs-v2".to_string(),
-    //     "bns".to_string(),
-    // ];
-    // settings.initial_deployer = initial_deployer;
-    // settings.repl_settings = project_config.repl_settings.clone();
-    // settings.disk_cache_enabled = true;
 }
 
 pub fn check_deployments(manifest_path: &PathBuf) -> Result<(), String> {
@@ -668,32 +496,104 @@ pub fn write_deployment(deployment: &DeploymentSpecification, target_path: &Path
     Ok(())
 }
 
-pub fn generate_default_deployment(manifest_path: &PathBuf, network: Option<StacksNetwork>) -> Result<DeploymentSpecification, String> {
-
-    let mut project_path = manifest_path.clone();
-    project_path.pop();
-
-    let mut chain_config_path = project_path.clone();
-    chain_config_path.push("settings");
-
-    chain_config_path.push(match network {
-        None | Some(StacksNetwork::Devnet) => "Devnet.toml",
-        Some(StacksNetwork::Testnet) => "Testnet.toml",
-        Some(StacksNetwork::Mainnet) => "Mainnet.toml",
-    });
+pub fn generate_default_deployment(manifest_path: &PathBuf, network: &Option<StacksNetwork>) -> Result<DeploymentSpecification, String> {
 
     let mut project_config = ProjectManifest::from_path(&manifest_path);
-    let chain_config = ChainConfig::from_path(&chain_config_path, match network {
-        None => &StacksNetwork::Devnet,
-        Some(ref network) => network,
-    });
+    let chain_config = ChainConfig::from_manifest_path(&manifest_path, &network);
 
     let default_deployer = match chain_config.accounts.get("deployer") {
         Some(deployer) => deployer,
         None => {
-            return Err(format!("{} unable to retrieve default deployer account in {}", red!("x"), chain_config_path.display()));
+            return Err(format!("{} unable to retrieve default deployer account", red!("x")));
         }
     };
+
+    let mut transactions = vec![];
+
+    // Only handle requirements in test environments
+    if network.is_none() && project_config.project.requirements.is_some() {
+        let default_cache_path = match PathBuf::from_str(&project_config.project.cache_dir) {
+            Ok(path) => path,
+            Err(_) => return Err("unable to get default cache path".to_string()),
+        };
+        let mut contracts = HashMap::new();
+        let requirements = project_config.project.requirements.take().unwrap();
+
+        // Load all the requirements
+        let mut queue = VecDeque::new();
+        for requirement in requirements.into_iter() {
+            let contract_id = match QualifiedContractIdentifier::parse(&requirement.contract_id) {
+                Ok(contract_id) => contract_id,
+                Err(e) => {
+                    return Err(format!("malformatted contract_id: {}", requirement.contract_id))
+                }
+            };
+            queue.push_front(contract_id);
+        }
+
+        let mut handled: HashMap<QualifiedContractIdentifier, (ContractAST, String, HashSet<QualifiedContractIdentifier>)> = HashMap::new();
+
+        let settings = SessionSettings::default();
+        let mut session = Session::new(settings);
+
+        while let Some(contract_id) = queue.pop_front() {        
+            // Extract principal from contract_id
+            if handled.contains_key(&contract_id) {
+                continue;
+            }
+            
+            // Download the code
+            let (source, path) = requirements::retrieve_contract(&contract_id, true, Some(default_cache_path.clone()))?;
+
+            let data = EmulatedContractPublishSpecification {
+                contract: contract_id.name.clone(),
+                emulated_sender: contract_id.issuer.clone(),
+                source: source.clone(),
+                relative_path: format!("{}", path.display()),
+            };
+            contracts.insert(contract_id.clone(), data);
+
+            let (ast, _, _) = session.interpreter.build_ast(
+                contract_id.clone(),
+                source.clone(),
+                2,
+            );
+            let mut contract_asts = HashMap::new();
+            contract_asts.insert(contract_id.clone(), ast.clone());
+            let dependencies =
+            ASTDependencyDetector::detect_dependencies(&contract_asts, &BTreeMap::new());
+
+            for (contract_id, dependencies) in dependencies.into_iter() {
+                for dependency in dependencies.iter() {
+                    queue.push_back(dependency.clone());
+                }
+                handled.insert(contract_id, (ast, source, dependencies));
+                break;
+            }
+        }
+
+        let mut unordered_dependencies = HashMap::new();
+        for (contract_id, (_, _, dependencies)) in handled.iter() {
+            unordered_dependencies.insert(contract_id.clone(), dependencies.clone());
+        } 
+
+
+        let ordered_contracts_ids = match ASTDependencyDetector::order_contracts(&unordered_dependencies) {
+            Ok(ordered_contracts) => ordered_contracts,
+            Err(e) => {
+                return Err(format!(
+                    "unable order contracts {}",
+                    e
+                ))
+            }
+        };
+    
+        for contract_id in ordered_contracts_ids.iter() {
+            let data = contracts.remove(contract_id).expect("unable to retrieve contract");
+            let tx = TransactionSpecification::EmulatedContractPublish(data);
+            transactions.push(tx);
+        }
+    }
 
     let mut contracts = HashMap::new();
 
@@ -709,7 +609,7 @@ pub fn generate_default_deployment(manifest_path: &PathBuf, network: Option<Stac
                 let deployer = match chain_config.accounts.get(deployer) {
                     Some(deployer) => deployer,
                     None => {
-                        return Err(format!("{} unable to retrieve account {} in {}", red!("x"), deployer, chain_config_path.display()));
+                        return Err(format!("{} unable to retrieve account '{}'", red!("x"), deployer));
                     }
                 };
                 deployer
@@ -744,9 +644,6 @@ pub fn generate_default_deployment(manifest_path: &PathBuf, network: Option<Stac
         contracts.insert(contract_id, contract);
     }
 
-    use clarity_repl::repl::SessionSettings;
-    use clarity_repl::analysis::ast_dependency_detector::ASTDependencyDetector;
-
     let settings = SessionSettings::default();
     let mut session = Session::new(settings);
 
@@ -773,10 +670,19 @@ pub fn generate_default_deployment(manifest_path: &PathBuf, network: Option<Stac
         }
     };
 
-    let mut transactions = vec![];
     for contract_id in ordered_contracts_ids.iter() {
         let data = contracts.remove(contract_id).expect("unable to retrieve contract");
-        let tx = TransactionSpecification::EmulatedContractPublish(data);
+        let tx = if network.is_none() {
+            TransactionSpecification::EmulatedContractPublish(data)
+        } else {
+            TransactionSpecification::ContractPublish(ContractPublishSpecification {
+                contract: data.contract.clone(),
+                expected_sender: data.emulated_sender.clone(),
+                relative_path: data.relative_path.clone(),
+                source: data.source.clone(),
+            })
+        };
+
         transactions.push(tx);
     }
 
@@ -815,29 +721,18 @@ pub fn generate_default_deployment(manifest_path: &PathBuf, network: Option<Stac
     let deployment = DeploymentSpecification {
         id: 0,
         name: "Test deployment, used by default by `clarinet console`, `clarinet test` and `clarinet check`".to_string(),
-        network: None,
+        network: network.clone(),
         start_block: 0,
-        genesis: Some(GenesisSpecification {
-            wallets,
-            contracts: boot_contracts
-        }),
+        genesis: if network.is_none() {
+            Some(GenesisSpecification {
+                wallets,
+                contracts: boot_contracts
+            })
+            } else { None },
         plan: TransactionPlanSpecification {
             batches
         }
     };
-
-    // let links = match project_config.project.requirements.take() {
-    //     Some(links) => links,
-    //     None => vec![],
-    // };
-
-    // for link_config in links.iter() {
-    //     settings.initial_links.push(repl::settings::InitialLink {
-    //         contract_id: link_config.contract_id.clone(),
-    //         stacks_node_addr: None,
-    //         cache: Some(project_config.project.cache_dir.clone()),
-    //     });
-    // }
 
     // settings.include_boot_contracts = vec![
     //     "pox".to_string(),
@@ -853,7 +748,7 @@ pub fn generate_default_deployment(manifest_path: &PathBuf, network: Option<Stac
 }
 
 pub fn create_default_test_deployment(manifest_path: &PathBuf) -> Result<DeploymentSpecification, String> {
-    let deployment = generate_default_deployment(&manifest_path, None)?;
+    let deployment = generate_default_deployment(&manifest_path, &None)?;
     Ok(deployment)
 }
 

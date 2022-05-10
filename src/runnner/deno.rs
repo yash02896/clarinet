@@ -89,7 +89,7 @@ mod sessions {
 
         let (mut session, contracts) = if !can_use_cache {
             let (mut session_settings, _, _) =
-                load_session_settings(&manifest_path, &StacksNetwork::Devnet)
+                load_session_settings(&manifest_path, &StacksNetwork::Devnet, true)
                     .expect("Unable to load manifest");
             session_settings.lazy_initial_contracts_interpretation = includes_pre_deployment_steps;
             let mut session = Session::new(session_settings.clone());
@@ -169,8 +169,6 @@ mod sessions {
                     name: name.clone(),
                     balance: account.balance,
                     address: account.address.clone(),
-                    mnemonic: account.mnemonic.clone(),
-                    derivation: account.derivation.clone(),
                 };
                 if name == "deployer" {
                     initial_deployer = Some(account.clone());
