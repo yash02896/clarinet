@@ -386,7 +386,11 @@ pub fn main() {
                 let manifest_path = get_manifest_path_or_exit(cmd.manifest_path);
                 // Ensure that all the deployments can correctly be deserialized.
                 println!("Checking deployments");
-                check_deployments(&manifest_path);
+                let res = check_deployments(&manifest_path);
+                if let Err(message) = res {
+                    println!("{}", message);
+                    process::exit(1);
+                }
             }
             Deployments::GenerateDeployment(cmd) => {
                 let manifest_path = get_manifest_path_or_exit(cmd.manifest_path);
@@ -402,8 +406,6 @@ pub fn main() {
                 };
 
                 let default_deployment_path = get_default_deployment_path(&manifest_path, &network);
-
-                println!("Generating deployment file");
                 let deployment = match generate_default_deployment(&manifest_path, &network) {
                     Ok(deployment) => deployment,
                     Err(message) => {
@@ -411,8 +413,20 @@ pub fn main() {
                         std::process::exit(1);
                     }
                 };
-                write_deployment(&deployment, &default_deployment_path)
-                    .expect("Unable to save deployment");
+                let res = write_deployment(&deployment, &default_deployment_path, true);
+                if let Err(message) = res {
+                    println!("{}", message);
+                    process::exit(1);
+                }
+
+                let mut relative_path = PathBuf::from("deployments");
+                relative_path.push(default_deployment_path.file_name().unwrap());
+                println!(
+                    "{} {}.",
+                    green!("Generated file"),
+                    relative_path.display()
+                );
+
             }
         },
         Command::Contracts(subcommand) => match subcommand {
