@@ -1,33 +1,35 @@
-use clarity_repl::clarity::{ClarityName, ContractName};
-use clarity_repl::clarity::types::{StandardPrincipalData, PrincipalData, QualifiedContractIdentifier};
+use clarity_repl::clarity::types::{
+    PrincipalData, QualifiedContractIdentifier, StandardPrincipalData,
+};
+use clarity_repl::clarity::util::hash::hex_bytes;
 use clarity_repl::clarity::util::StacksAddress;
-use serde::{Serialize, Deserialize};
-use std::path::PathBuf;
+use clarity_repl::clarity::{ClarityName, ContractName};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{BufReader, Read};
-use clarity_repl::clarity::util::hash::hex_bytes;
+use std::path::PathBuf;
 
-use std::str::FromStr;
-use std::fs::DirEntry;
 use std::fs;
+use std::fs::DirEntry;
+use std::str::FromStr;
 
-use crate::types::{StacksNetwork};
+use crate::types::StacksNetwork;
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub struct TransactionPlanSpecification {
-    pub batches: Vec<TransactionsBatchSpecification>
+    pub batches: Vec<TransactionsBatchSpecification>,
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub struct TransactionPlanSpecificationFile {
-    pub batches: Vec<TransactionsBatchSpecificationFile>
+    pub batches: Vec<TransactionsBatchSpecificationFile>,
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub struct TransactionsBatchSpecificationFile {
     pub id: usize,
-    pub transactions: Vec<TransactionSpecificationFile>
+    pub transactions: Vec<TransactionSpecificationFile>,
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
@@ -79,7 +81,7 @@ pub struct EmulatedContractPublishSpecificationFile {
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub struct TransactionsBatchSpecification {
     pub id: usize,
-    pub transactions: Vec<TransactionSpecification>
+    pub transactions: Vec<TransactionSpecification>,
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
@@ -103,21 +105,38 @@ pub struct ContractCallSpecification {
 }
 
 impl ContractCallSpecification {
-    pub fn from_specifications(specs: &ContractCallSpecificationFile) -> Result<ContractCallSpecification, String> {
-
+    pub fn from_specifications(
+        specs: &ContractCallSpecificationFile,
+    ) -> Result<ContractCallSpecification, String> {
         let contract_id = match QualifiedContractIdentifier::parse(&specs.contract_id) {
             Ok(res) => res,
-            Err(_) => return Err(format!("unable to parse {} as a valid contract_id", specs.contract_id))
+            Err(_) => {
+                return Err(format!(
+                    "unable to parse {} as a valid contract_id",
+                    specs.contract_id
+                ))
+            }
         };
 
-        let expected_sender = match PrincipalData::parse_standard_principal(&specs.expected_sender) {
+        let expected_sender = match PrincipalData::parse_standard_principal(&specs.expected_sender)
+        {
             Ok(res) => res,
-            Err(_) => return Err(format!("unable to turn emulated_sender {} as a valid Stacks address", specs.expected_sender))
+            Err(_) => {
+                return Err(format!(
+                    "unable to turn emulated_sender {} as a valid Stacks address",
+                    specs.expected_sender
+                ))
+            }
         };
 
         let method = match ClarityName::try_from(specs.method.to_string()) {
             Ok(res) => res,
-            Err(_) => return Err(format!("unable to use {} as a valid contract name", specs.method))
+            Err(_) => {
+                return Err(format!(
+                    "unable to use {} as a valid contract name",
+                    specs.method
+                ))
+            }
         };
 
         Ok(ContractCallSpecification {
@@ -138,16 +157,29 @@ pub struct ContractPublishSpecification {
 }
 
 impl ContractPublishSpecification {
-    pub fn from_specifications(specs: &ContractPublishSpecificationFile, base_path: &PathBuf) -> Result<ContractPublishSpecification, String> {
-
+    pub fn from_specifications(
+        specs: &ContractPublishSpecificationFile,
+        base_path: &PathBuf,
+    ) -> Result<ContractPublishSpecification, String> {
         let contract = match ContractName::try_from(specs.contract.to_string()) {
             Ok(res) => res,
-            Err(_) => return Err(format!("unable to use {} as a valid contract name", specs.contract))
+            Err(_) => {
+                return Err(format!(
+                    "unable to use {} as a valid contract name",
+                    specs.contract
+                ))
+            }
         };
 
-        let expected_sender = match PrincipalData::parse_standard_principal(&specs.expected_sender) {
+        let expected_sender = match PrincipalData::parse_standard_principal(&specs.expected_sender)
+        {
             Ok(res) => res,
-            Err(_) => return Err(format!("unable to turn emulated_sender {} as a valid Stacks address", specs.expected_sender))
+            Err(_) => {
+                return Err(format!(
+                    "unable to turn emulated_sender {} as a valid Stacks address",
+                    specs.expected_sender
+                ))
+            }
         };
 
         let path = match PathBuf::try_from(&specs.path) {
@@ -158,7 +190,7 @@ impl ContractPublishSpecification {
         let mut contract_path = base_path.clone();
         contract_path.push(path);
 
-        let source = match  fs::read_to_string(&contract_path) {
+        let source = match fs::read_to_string(&contract_path) {
             Ok(code) => code,
             Err(err) => {
                 return Err(format!(
@@ -186,21 +218,38 @@ pub struct EmulatedContractCallSpecification {
 }
 
 impl EmulatedContractCallSpecification {
-    pub fn from_specifications(specs: &EmulatedContractCallSpecificationFile) -> Result<EmulatedContractCallSpecification, String> {
-
+    pub fn from_specifications(
+        specs: &EmulatedContractCallSpecificationFile,
+    ) -> Result<EmulatedContractCallSpecification, String> {
         let contract_id = match QualifiedContractIdentifier::parse(&specs.contract_id) {
             Ok(res) => res,
-            Err(_) => return Err(format!("unable to parse {} as a valid contract_id", specs.contract_id))
+            Err(_) => {
+                return Err(format!(
+                    "unable to parse {} as a valid contract_id",
+                    specs.contract_id
+                ))
+            }
         };
 
-        let emulated_sender = match PrincipalData::parse_standard_principal(&specs.emulated_sender) {
+        let emulated_sender = match PrincipalData::parse_standard_principal(&specs.emulated_sender)
+        {
             Ok(res) => res,
-            Err(_) => return Err(format!("unable to turn emulated_sender {} as a valid Stacks address", specs.emulated_sender))
+            Err(_) => {
+                return Err(format!(
+                    "unable to turn emulated_sender {} as a valid Stacks address",
+                    specs.emulated_sender
+                ))
+            }
         };
 
         let method = match ClarityName::try_from(specs.method.to_string()) {
             Ok(res) => res,
-            Err(_) => return Err(format!("unable to use {} as a valid contract name", specs.method))
+            Err(_) => {
+                return Err(format!(
+                    "unable to use {} as a valid contract name",
+                    specs.method
+                ))
+            }
         };
 
         Ok(EmulatedContractCallSpecification {
@@ -212,7 +261,6 @@ impl EmulatedContractCallSpecification {
     }
 }
 
-
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 pub struct EmulatedContractPublishSpecification {
     pub contract: ContractName,
@@ -222,16 +270,29 @@ pub struct EmulatedContractPublishSpecification {
 }
 
 impl EmulatedContractPublishSpecification {
-    pub fn from_specifications(specs: &EmulatedContractPublishSpecificationFile, base_path: &PathBuf) -> Result<EmulatedContractPublishSpecification, String> {
-
+    pub fn from_specifications(
+        specs: &EmulatedContractPublishSpecificationFile,
+        base_path: &PathBuf,
+    ) -> Result<EmulatedContractPublishSpecification, String> {
         let contract = match ContractName::try_from(specs.contract.to_string()) {
             Ok(res) => res,
-            Err(_) => return Err(format!("unable to use {} as a valid contract name", specs.contract))
+            Err(_) => {
+                return Err(format!(
+                    "unable to use {} as a valid contract name",
+                    specs.contract
+                ))
+            }
         };
 
-        let emulated_sender = match PrincipalData::parse_standard_principal(&specs.emulated_sender) {
+        let emulated_sender = match PrincipalData::parse_standard_principal(&specs.emulated_sender)
+        {
             Ok(res) => res,
-            Err(_) => return Err(format!("unable to turn emulated_sender {} as a valid Stacks address", specs.emulated_sender))
+            Err(_) => {
+                return Err(format!(
+                    "unable to turn emulated_sender {} as a valid Stacks address",
+                    specs.emulated_sender
+                ))
+            }
         };
 
         let path = match PathBuf::try_from(&specs.path) {
@@ -242,7 +303,7 @@ impl EmulatedContractPublishSpecification {
         let mut contract_path = base_path.clone();
         contract_path.push(path);
 
-        let source = match  fs::read_to_string(&contract_path) {
+        let source = match fs::read_to_string(&contract_path) {
             Ok(code) => code,
             Err(err) => {
                 return Err(format!(
@@ -273,8 +334,10 @@ pub struct DeploymentSpecification {
 }
 
 impl DeploymentSpecification {
-
-    pub fn from_config_file(path: &PathBuf, base_path: &PathBuf) -> Result<DeploymentSpecification, String> {
+    pub fn from_config_file(
+        path: &PathBuf,
+        base_path: &PathBuf,
+    ) -> Result<DeploymentSpecification, String> {
         let path = match File::open(path) {
             Ok(path) => path,
             Err(_e) => {
@@ -283,33 +346,49 @@ impl DeploymentSpecification {
         };
         let mut spec_file_reader = BufReader::new(path);
         let mut spec_file_buffer = vec![];
-        spec_file_reader
-            .read_to_end(&mut spec_file_buffer)
-            .unwrap();
+        spec_file_reader.read_to_end(&mut spec_file_buffer).unwrap();
 
-        let specification_file: DeploymentSpecificationFile = match serde_yaml::from_slice(&spec_file_buffer[..]) {
-            Ok(res) => res,
-            Err(msg) => {
-                return Err(format!("unable to read file {}", msg))
-            }
-        };
+        let specification_file: DeploymentSpecificationFile =
+            match serde_yaml::from_slice(&spec_file_buffer[..]) {
+                Ok(res) => res,
+                Err(msg) => return Err(format!("unable to read file {}", msg)),
+            };
 
         let deployment_spec = if specification_file.network.to_lowercase() == "test" {
             DeploymentSpecification::from_specifications(&specification_file, None, base_path)?
         } else if specification_file.network.to_lowercase() == "devnet" {
-            DeploymentSpecification::from_specifications(&specification_file, Some(StacksNetwork::Devnet), base_path)?
+            DeploymentSpecification::from_specifications(
+                &specification_file,
+                Some(StacksNetwork::Devnet),
+                base_path,
+            )?
         } else if specification_file.network.to_lowercase() == "testnet" {
-            DeploymentSpecification::from_specifications(&specification_file, Some(StacksNetwork::Testnet), base_path)?
+            DeploymentSpecification::from_specifications(
+                &specification_file,
+                Some(StacksNetwork::Testnet),
+                base_path,
+            )?
         } else if specification_file.network.to_lowercase() == "mainnet" {
-            DeploymentSpecification::from_specifications(&specification_file, Some(StacksNetwork::Mainnet), base_path)?
+            DeploymentSpecification::from_specifications(
+                &specification_file,
+                Some(StacksNetwork::Mainnet),
+                base_path,
+            )?
         } else {
-            return Err(format!("network '{}' not supported (test, devnet, testnet, mainnet)", specification_file.network))
+            return Err(format!(
+                "network '{}' not supported (test, devnet, testnet, mainnet)",
+                specification_file.network
+            ));
         };
 
         Ok(deployment_spec)
     }
 
-    pub fn from_specifications(specs: &DeploymentSpecificationFile, network: Option<StacksNetwork>, base_path: &PathBuf) -> Result<DeploymentSpecification, String> {
+    pub fn from_specifications(
+        specs: &DeploymentSpecificationFile,
+        network: Option<StacksNetwork>,
+        base_path: &PathBuf,
+    ) -> Result<DeploymentSpecification, String> {
         let (plan, genesis) = match &network {
             None => {
                 let mut batches = vec![];
@@ -333,16 +412,14 @@ impl DeploymentSpecification {
                         }
                         batches.push(TransactionsBatchSpecification {
                             id: batch.id,
-                            transactions
+                            transactions,
                         });
                     }
                 }
                 if let Some(ref genesis_specs) = specs.genesis {
                     genesis = Some(GenesisSpecification::from_specifications(genesis_specs)?);
-                } 
-                (TransactionPlanSpecification {
-                    batches
-                }, genesis)
+                }
+                (TransactionPlanSpecification { batches }, genesis)
             }
             Some(network) => {
                 let mut batches = vec![];
@@ -365,13 +442,11 @@ impl DeploymentSpecification {
                         }
                         batches.push(TransactionsBatchSpecification {
                             id: batch.id,
-                            transactions
+                            transactions,
                         });
                     }
                 }
-                (TransactionPlanSpecification {
-                    batches
-                }, None)
+                (TransactionPlanSpecification { batches }, None)
             }
         };
         Ok(DeploymentSpecification {
@@ -380,7 +455,7 @@ impl DeploymentSpecification {
             network,
             genesis,
             start_block: specs.start_block.unwrap_or(0),
-            plan
+            plan,
         })
     }
 
@@ -397,7 +472,7 @@ impl DeploymentSpecification {
             start_block: Some(self.start_block),
             genesis: match self.genesis {
                 Some(ref g) => Some(g.to_specification_file()),
-                None => None
+                None => None,
             },
             plan: Some(self.plan.to_specification_file()),
         }
@@ -435,13 +510,13 @@ pub struct GenesisSpecification {
 }
 
 impl GenesisSpecification {
-
-    pub fn from_specifications(specs: &GenesisSpecificationFile) -> Result<GenesisSpecification, String> {
-
+    pub fn from_specifications(
+        specs: &GenesisSpecificationFile,
+    ) -> Result<GenesisSpecification, String> {
         let mut wallets = vec![];
         for wallet in specs.wallets.iter() {
             wallets.push(WalletSpecification::from_specifications(wallet)?);
-        } 
+        }
 
         Ok(GenesisSpecification {
             wallets,
@@ -450,7 +525,6 @@ impl GenesisSpecification {
     }
 
     pub fn to_specification_file(&self) -> GenesisSpecificationFile {
-
         let mut wallets = vec![];
         for wallet in self.wallets.iter() {
             wallets.push(WalletSpecificationFile {
@@ -458,7 +532,7 @@ impl GenesisSpecification {
                 principal: wallet.principal.to_string(),
                 amount: format!("{}", wallet.amount),
             })
-        } 
+        }
 
         GenesisSpecificationFile {
             wallets,
@@ -475,17 +549,27 @@ pub struct WalletSpecification {
 }
 
 impl WalletSpecification {
-
-    pub fn from_specifications(specs: &WalletSpecificationFile) -> Result<WalletSpecification, String> {
-
+    pub fn from_specifications(
+        specs: &WalletSpecificationFile,
+    ) -> Result<WalletSpecification, String> {
         let principal = match PrincipalData::parse_standard_principal(&specs.principal) {
             Ok(res) => res,
-            Err(_) => return Err(format!("unable to turn {}'s principal as a valid Stacks address", specs.label))
+            Err(_) => {
+                return Err(format!(
+                    "unable to turn {}'s principal as a valid Stacks address",
+                    specs.label
+                ))
+            }
         };
 
         let amount = match u128::from_str_radix(&specs.amount, 10) {
             Ok(res) => res,
-            Err(_) => return Err(format!("unable to parse {}'s balance as a u128", specs.label))
+            Err(_) => {
+                return Err(format!(
+                    "unable to parse {}'s balance as a u128",
+                    specs.label
+                ))
+            }
         };
 
         Ok(WalletSpecification {
@@ -494,62 +578,61 @@ impl WalletSpecification {
             amount,
         })
     }
-
 }
 
 impl TransactionPlanSpecification {
-
     pub fn to_specification_file(&self) -> TransactionPlanSpecificationFile {
-
         let mut batches = vec![];
         for batch in self.batches.iter() {
-
             let mut transactions = vec![];
             for tx in batch.transactions.iter() {
-
                 let tx = match tx {
                     TransactionSpecification::ContractCall(tx) => {
                         TransactionSpecificationFile::ContractCall(ContractCallSpecificationFile {
                             contract_id: tx.contract_id.to_string(),
                             expected_sender: tx.expected_sender.to_address(),
                             method: tx.method.to_string(),
-                            parameters: tx.parameters.clone()
+                            parameters: tx.parameters.clone(),
                         })
                     }
                     TransactionSpecification::ContractPublish(tx) => {
-                        TransactionSpecificationFile::ContractPublish(ContractPublishSpecificationFile {
-                            contract: tx.contract.to_string(),
-                            expected_sender: tx.expected_sender.to_address(),
-                            path: tx.relative_path.clone()
-                        })
+                        TransactionSpecificationFile::ContractPublish(
+                            ContractPublishSpecificationFile {
+                                contract: tx.contract.to_string(),
+                                expected_sender: tx.expected_sender.to_address(),
+                                path: tx.relative_path.clone(),
+                            },
+                        )
                     }
                     TransactionSpecification::EmulatedContractCall(tx) => {
-                        TransactionSpecificationFile::EmulatedContractCall(EmulatedContractCallSpecificationFile {
-                            contract_id: tx.contract_id.to_string(),
-                            emulated_sender: tx.emulated_sender.to_address(),
-                            method: tx.method.to_string(),
-                            parameters: tx.parameters.clone()
-                        })
+                        TransactionSpecificationFile::EmulatedContractCall(
+                            EmulatedContractCallSpecificationFile {
+                                contract_id: tx.contract_id.to_string(),
+                                emulated_sender: tx.emulated_sender.to_address(),
+                                method: tx.method.to_string(),
+                                parameters: tx.parameters.clone(),
+                            },
+                        )
                     }
                     TransactionSpecification::EmulatedContractPublish(tx) => {
-                        TransactionSpecificationFile::EmulatedContractPublish(EmulatedContractPublishSpecificationFile {
-                            contract: tx.contract.to_string(),
-                            emulated_sender: tx.emulated_sender.to_address(),
-                            path: tx.relative_path.clone()
-                        })
+                        TransactionSpecificationFile::EmulatedContractPublish(
+                            EmulatedContractPublishSpecificationFile {
+                                contract: tx.contract.to_string(),
+                                emulated_sender: tx.emulated_sender.to_address(),
+                                path: tx.relative_path.clone(),
+                            },
+                        )
                     }
                 };
                 transactions.push(tx);
             }
-            
+
             batches.push(TransactionsBatchSpecificationFile {
                 id: batch.id,
-                transactions
+                transactions,
             });
-        } 
-
-        TransactionPlanSpecificationFile {
-            batches
         }
+
+        TransactionPlanSpecificationFile { batches }
     }
 }

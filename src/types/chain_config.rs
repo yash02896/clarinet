@@ -168,9 +168,11 @@ pub struct AccountConfig {
 }
 
 impl ChainConfig {
-
     #[allow(non_fmt_panics)]
-    pub fn from_manifest_path(manifest_path: &PathBuf, network: &Option<StacksNetwork>) -> ChainConfig {
+    pub fn from_manifest_path(
+        manifest_path: &PathBuf,
+        network: &Option<StacksNetwork>,
+    ) -> ChainConfig {
         let mut chain_config_path = manifest_path.clone();
         chain_config_path.pop();
         chain_config_path.push("settings");
@@ -179,10 +181,13 @@ impl ChainConfig {
             Some(StacksNetwork::Testnet) => "Testnet.toml",
             Some(StacksNetwork::Mainnet) => "Mainnet.toml",
         });
-        let chain_config = ChainConfig::from_path(&chain_config_path, match network {
-            None => &StacksNetwork::Devnet,
-            Some(ref network) => network,
-        });
+        let chain_config = ChainConfig::from_path(
+            &chain_config_path,
+            match network {
+                None => &StacksNetwork::Devnet,
+                Some(ref network) => network,
+            },
+        );
         chain_config
     }
 

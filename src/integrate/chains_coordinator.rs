@@ -1,10 +1,10 @@
 use super::DevnetEvent;
+use crate::deployment::{apply_on_chain_deployment, read_or_default_to_generated_deployment};
 use crate::indexer::{chains, Indexer, IndexerConfig};
 use crate::integrate::{MempoolAdmissionData, ServiceStatusData, Status};
 use crate::poke::load_session;
-use crate::deployment::{read_or_default_to_generated_deployment, apply_on_chain_deployment};
-use crate::types::{self, DevnetConfig, AccountConfig};
-use crate::types::{BitcoinChainEvent, ChainsCoordinatorCommand, StacksNetwork, StacksChainEvent};
+use crate::types::{self, AccountConfig, DevnetConfig};
+use crate::types::{BitcoinChainEvent, ChainsCoordinatorCommand, StacksChainEvent, StacksNetwork};
 use crate::utils;
 use crate::utils::stacks::{transactions, PoxInfo, StacksRpc};
 use base58::FromBase58;
@@ -26,7 +26,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 use std::str;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex, RwLock};
 use tracing::info;
 
@@ -638,8 +638,10 @@ pub fn publish_initial_contracts(
     let moved_devnet_event_tx = devnet_event_tx.clone();
     std::thread::spawn(|| {
         let manifest_path = moved_manifest_path;
-        let deployment = read_or_default_to_generated_deployment(&manifest_path, &Some(StacksNetwork::Devnet)).unwrap();
-        let (event_tx, event_rx ) = channel();
+        let deployment =
+            read_or_default_to_generated_deployment(&manifest_path, &Some(StacksNetwork::Devnet))
+                .unwrap();
+        let (event_tx, event_rx) = channel();
         let (command_tx, command_rx) = channel();
 
         apply_on_chain_deployment(&manifest_path, &deployment, event_tx, command_rx);

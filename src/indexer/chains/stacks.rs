@@ -6,7 +6,7 @@ use crate::types::{
     Operation, OperationIdentifier, OperationStatusKind, OperationType, StacksBlockData,
     StacksBlockMetadata, StacksContractDeploymentData, StacksMicroblockData, StacksTransactionData,
     StacksTransactionExecutionCost, StacksTransactionKind, StacksTransactionMetadata,
-    StacksTransactionReceipt, TransactionIdentifier
+    StacksTransactionReceipt, TransactionIdentifier,
 };
 use clarity_repl::clarity::codec::transaction::{TransactionAuth, TransactionPayload};
 use clarity_repl::clarity::codec::{StacksMessageCodec, StacksTransaction};

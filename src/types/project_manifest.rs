@@ -188,7 +188,11 @@ impl ProjectManifest {
                             };
                             config_contracts.insert(
                                 contract_name.to_string(),
-                                ContractConfig { path, depends_on, deployer },
+                                ContractConfig {
+                                    path,
+                                    depends_on,
+                                    deployer,
+                                },
                             );
                         }
                         _ => {}

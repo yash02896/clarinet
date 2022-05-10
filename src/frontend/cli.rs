@@ -1,9 +1,11 @@
-use std::fs::{self, File};
-use std::collections::{BTreeSet, HashMap};
-use std::io::{prelude::*, BufReader, Read};
-use std::path::PathBuf;
-use std::{env, process};
-use std::sync::mpsc::channel;
+use crate::deployment::{
+    apply_on_chain_deployment, check_deployments, get_absolute_deployment_path,
+    get_default_deployment_path, read_or_default_to_generated_deployment,
+};
+use crate::deployment::{
+    create_default_test_deployment, display_deployment, generate_default_deployment,
+    load_deployment, setup_session_from_deployment, write_deployment,
+};
 use crate::generate::{
     self,
     changes::{Changes, TOMLEdition},
@@ -11,14 +13,18 @@ use crate::generate::{
 use crate::integrate::{self, DevnetOrchestrator};
 use crate::lsp::run_lsp;
 use crate::poke::load_session;
-use crate::deployment::{check_deployments, apply_on_chain_deployment, read_or_default_to_generated_deployment, get_default_deployment_path, get_absolute_deployment_path};
 use crate::runnner::run_scripts;
-use crate::types::{StacksNetwork, ProjectManifest, ProjectManifestFile, RequirementConfig};
-use crate::deployment::{setup_session_from_deployment, load_deployment, create_default_test_deployment, generate_default_deployment, display_deployment, write_deployment};
+use crate::types::{ProjectManifest, ProjectManifestFile, RequirementConfig, StacksNetwork};
 use clarity_repl::clarity::analysis::{AnalysisDatabase, ContractAnalysis};
 use clarity_repl::clarity::costs::LimitedCostTracker;
 use clarity_repl::clarity::types::QualifiedContractIdentifier;
 use clarity_repl::{analysis, repl, Terminal};
+use std::collections::{BTreeSet, HashMap};
+use std::fs::{self, File};
+use std::io::{prelude::*, BufReader, Read};
+use std::path::PathBuf;
+use std::sync::mpsc::channel;
+use std::{env, process};
 
 use clap::{IntoApp, Parser, Subcommand};
 use clap_generate::{Generator, Shell};
@@ -44,7 +50,7 @@ enum Command {
     Contracts(Contracts),
     /// Subcommands for working with deployments
     #[clap(subcommand, name = "deployments")]
-    Deployments(Deployments),    
+    Deployments(Deployments),
     /// Load contracts in a REPL for an interactive session
     #[clap(name = "console", aliases = &["poke"], bin_name = "console")]
     Console(Console),
@@ -163,7 +169,6 @@ struct Publish {
     pub manifest_path: Option<String>,
 }
 
-
 #[derive(Parser, PartialEq, Clone, Debug)]
 struct CheckDeployments {
     /// Path to Clarinet.toml
@@ -179,7 +184,7 @@ struct GenerateDeployment {
         conflicts_with = "devnet",
         conflicts_with = "testnet",
         conflicts_with = "mainnet"
-    )]    
+    )]
     pub test: bool,
     /// Generate a deployment file for devnet, using settings/Devnet.toml
     #[clap(
@@ -406,9 +411,9 @@ pub fn main() {
                         std::process::exit(1);
                     }
                 };
-                write_deployment(&deployment, &default_deployment_path).expect("Unable to save deployment");   
+                write_deployment(&deployment, &default_deployment_path)
+                    .expect("Unable to save deployment");
             }
-
         },
         Command::Contracts(subcommand) => match subcommand {
             Contracts::NewContract(new_contract) => {
@@ -517,7 +522,9 @@ pub fn main() {
                     )
                 };
 
-                let deployment = read_or_default_to_generated_deployment(&manifest_path, &Some(network.clone())).unwrap();
+                let deployment =
+                    read_or_default_to_generated_deployment(&manifest_path, &Some(network.clone()))
+                        .unwrap();
                 let (event_tx, event_rx) = channel();
                 let (command_tx, command_rx) = channel();
 
@@ -540,7 +547,10 @@ pub fn main() {
             let manifest_path = get_manifest_path_or_exit(cmd.manifest_path);
             let res = match cmd.deployment_plan_path {
                 None => generate_default_deployment(&manifest_path, &None),
-                Some(path) => load_deployment(&manifest_path, &get_absolute_deployment_path(&manifest_path, &path))
+                Some(path) => load_deployment(
+                    &manifest_path,
+                    &get_absolute_deployment_path(&manifest_path, &path),
+                ),
             };
 
             let deployment = match res {
@@ -558,18 +568,16 @@ pub fn main() {
                     std::process::exit(1);
                 }
             };
-        
+
             let mut terminal = Terminal::load(session);
             terminal.start();
 
-
-
-                        // let deployment_path = get_deployment_or_default_to_test(&manifest_path, cmd.deployment_plan_path);
+            // let deployment_path = get_deployment_or_default_to_test(&manifest_path, cmd.deployment_plan_path);
 
             // let deployment = if fs::metadata(&deployment_path).is_err() {
             //     println!("No deployment plan specified, and a default deployments/Test.yaml could not be found.");
             //     println!("Do you want to generate a default plan?");
-                
+
             //     // Create and display a `deployments/test.yaml` file
             //     let deployment = match create_default_test_deployment(&manifest_path) {
             //         Ok(deployment) => deployment,
@@ -580,9 +588,9 @@ pub fn main() {
             //     };
             //     display_deployment(&deployment);
             //     println!("Do you want to save this deployment to disk and proceed with this deployment? Y/n");
-                
-            //     write_deployment(&deployment, &deployment_path).expect("Unable to save deployment");   
-                
+
+            //     write_deployment(&deployment, &deployment_path).expect("Unable to save deployment");
+
             //     deployment
             // } else {
             //     let deployment = match load_deployment(&manifest_path, &deployment_path) {
@@ -592,7 +600,7 @@ pub fn main() {
             //             std::process::exit(1);
             //         }
             //     };
-    
+
             //     deployment
             // };
 
@@ -702,24 +710,24 @@ pub fn main() {
         Command::Check(cmd) => {
             let manifest_path = get_manifest_path_or_exit(cmd.manifest_path);
             let start_repl = false;
-            let project_manifest = match load_session(&manifest_path, start_repl, &StacksNetwork::Devnet)
-            {
-                Err((_, e)) => {
-                    println!("{}", e);
-                    return;
-                }
-                Ok((session, _, manifest, output)) => {
-                    if let Some(message) = output {
-                        println!("{}", message);
+            let project_manifest =
+                match load_session(&manifest_path, start_repl, &StacksNetwork::Devnet) {
+                    Err((_, e)) => {
+                        println!("{}", e);
+                        return;
                     }
-                    println!(
-                        "{} Syntax of {} contract(s) successfully checked",
-                        green!("✔"),
-                        session.settings.initial_contracts.len()
-                    );
-                    manifest
-                }
-            };
+                    Ok((session, _, manifest, output)) => {
+                        if let Some(message) = output {
+                            println!("{}", message);
+                        }
+                        println!(
+                            "{} Syntax of {} contract(s) successfully checked",
+                            green!("✔"),
+                            session.settings.initial_contracts.len()
+                        );
+                        manifest
+                    }
+                };
             if hints_enabled {
                 display_post_check_hint();
             }

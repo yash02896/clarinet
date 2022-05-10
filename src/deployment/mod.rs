@@ -1,23 +1,35 @@
-mod ui;
-mod types;
 mod requirements;
+mod types;
+mod ui;
 
-use clarity_repl::clarity::types::{StandardPrincipalData, PrincipalData, QualifiedContractIdentifier};
-use clarity_repl::clarity::{ClarityName, ContractName};
-use self::types::{DeploymentSpecification, TransactionPlanSpecificationFile, ContractCallSpecificationFile, EmulatedContractPublishSpecification, TransactionsBatchSpecification, TransactionPlanSpecification, GenesisSpecification, WalletSpecification};
-use crate::deployment::types::{DeploymentSpecificationFile, TransactionsBatchSpecificationFile, TransactionSpecificationFile, TransactionSpecification};
+use self::types::{
+    ContractCallSpecificationFile, DeploymentSpecification, EmulatedContractPublishSpecification,
+    GenesisSpecification, TransactionPlanSpecification, TransactionPlanSpecificationFile,
+    TransactionsBatchSpecification, WalletSpecification,
+};
+use crate::deployment::types::ContractPublishSpecification;
+use crate::deployment::types::{
+    DeploymentSpecificationFile, TransactionSpecification, TransactionSpecificationFile,
+    TransactionsBatchSpecificationFile,
+};
 use crate::integrate::DevnetEvent;
 use crate::poke::{load_session, load_session_settings};
-use crate::types::{ChainsCoordinatorCommand, StacksNetwork, ProjectManifest, ChainConfig, AccountConfig};
+use crate::types::{
+    AccountConfig, ChainConfig, ChainsCoordinatorCommand, ProjectManifest, StacksNetwork,
+};
 use crate::utils::mnemonic;
 use crate::utils::stacks::StacksRpc;
+use clarity_repl::analysis::ast_dependency_detector::ASTDependencyDetector;
+use clarity_repl::clarity::ast::ContractAST;
 use clarity_repl::clarity::codec::transaction::{
     StacksTransaction, StacksTransactionSigner, TransactionAnchorMode, TransactionAuth,
     TransactionPayload, TransactionPostConditionMode, TransactionPublicKeyEncoding,
     TransactionSmartContract, TransactionSpendingCondition,
 };
-use clarity_repl::clarity::ast::ContractAST;
 use clarity_repl::clarity::codec::StacksMessageCodec;
+use clarity_repl::clarity::types::{
+    PrincipalData, QualifiedContractIdentifier, StandardPrincipalData,
+};
 use clarity_repl::clarity::util::{
     C32_ADDRESS_VERSION_MAINNET_SINGLESIG, C32_ADDRESS_VERSION_TESTNET_SINGLESIG,
 };
@@ -34,21 +46,20 @@ use clarity_repl::clarity::{
         StacksAddress,
     },
 };
-use clarity_repl::repl::SessionSettings;
-use clarity_repl::analysis::ast_dependency_detector::ASTDependencyDetector;
+use clarity_repl::clarity::{ClarityName, ContractName};
+use clarity_repl::repl::settings::InitialContract;
 use clarity_repl::repl::Session;
-use clarity_repl::repl::settings::{InitialContract};
+use clarity_repl::repl::SessionSettings;
 use libsecp256k1::{PublicKey, SecretKey};
-use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::PathBuf;
-use std::str::FromStr;
-use std::sync::mpsc::{channel, Sender, Receiver};
-use std::fs::{self, File};
-use std::io::Write;
-use tiny_hderive::bip32::ExtendedPrivKey;
 use serde_yaml;
 use std::collections::VecDeque;
-use crate::deployment::types::ContractPublishSpecification;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fs::{self, File};
+use std::io::Write;
+use std::path::PathBuf;
+use std::str::FromStr;
+use std::sync::mpsc::{channel, Receiver, Sender};
+use tiny_hderive::bip32::ExtendedPrivKey;
 
 #[derive(Deserialize, Debug)]
 pub struct Balance {
@@ -97,7 +108,6 @@ pub fn encode_contract_publish(
     deployment_fee_rate: u64,
     network: &StacksNetwork,
 ) -> Result<StacksTransaction, String> {
-
     let payload = TransactionSmartContract {
         name: contract_name.clone(),
         code_body: StacksString::from_str(source).unwrap(),
@@ -167,9 +177,11 @@ pub fn encode_contract_publish(
     Ok(signed_tx)
 }
 
-pub fn setup_session_from_deployment(deployment: &DeploymentSpecification) -> Result<Session, String> {
-    use clarity_repl::repl::SessionSettings;
+pub fn setup_session_from_deployment(
+    deployment: &DeploymentSpecification,
+) -> Result<Session, String> {
     use crate::deployment::types::TransactionSpecification;
+    use clarity_repl::repl::SessionSettings;
 
     let mut settings = SessionSettings::default();
     let mut session = Session::new(settings);
@@ -186,22 +198,38 @@ pub fn setup_session_from_deployment(deployment: &DeploymentSpecification) -> Re
 
     if let Some(ref genesis) = deployment.genesis {
         for wallet in genesis.wallets.iter() {
-            let _ = session.interpreter.mint_stx_balance(wallet.principal.clone().into(), wallet.amount.try_into().unwrap());
+            let _ = session.interpreter.mint_stx_balance(
+                wallet.principal.clone().into(),
+                wallet.amount.try_into().unwrap(),
+            );
         }
     }
 
     for batch in deployment.plan.batches.iter() {
         for transaction in batch.transactions.iter() {
             match transaction {
-                TransactionSpecification::ContractCall(_) | TransactionSpecification::ContractPublish(_) => {}
+                TransactionSpecification::ContractCall(_)
+                | TransactionSpecification::ContractPublish(_) => {}
                 TransactionSpecification::EmulatedContractPublish(tx) => {
                     let default_tx_sender = session.get_tx_sender();
                     session.set_tx_sender(tx.emulated_sender.to_string());
-                    let _ = session.interpret(tx.source.clone(), Some(tx.contract.to_string()), false, false, None);
+                    let _ = session.interpret(
+                        tx.source.clone(),
+                        Some(tx.contract.to_string()),
+                        false,
+                        false,
+                        None,
+                    );
                     session.set_tx_sender(default_tx_sender);
                 }
                 TransactionSpecification::EmulatedContractCall(tx) => {
-                    let _ = session.invoke_contract_call(&tx.contract_id.to_string(), &tx.method.to_string(), &tx.parameters, &tx.emulated_sender.to_string(), "deployment".to_string());
+                    let _ = session.invoke_contract_call(
+                        &tx.contract_id.to_string(),
+                        &tx.method.to_string(),
+                        &tx.parameters,
+                        &tx.emulated_sender.to_string(),
+                        "deployment".to_string(),
+                    );
                 }
             }
         }
@@ -211,7 +239,10 @@ pub fn setup_session_from_deployment(deployment: &DeploymentSpecification) -> Re
     Ok(session)
 }
 
-pub fn get_absolute_deployment_path(manifest_path: &PathBuf, relative_deployment_path: &str) -> PathBuf {
+pub fn get_absolute_deployment_path(
+    manifest_path: &PathBuf,
+    relative_deployment_path: &str,
+) -> PathBuf {
     let mut base_path = manifest_path.clone();
     base_path.pop();
     let path = match PathBuf::from_str(relative_deployment_path) {
@@ -224,7 +255,10 @@ pub fn get_absolute_deployment_path(manifest_path: &PathBuf, relative_deployment
     base_path.join(path)
 }
 
-pub fn get_default_deployment_path(manifest_path: &PathBuf, network: &Option<StacksNetwork>) -> PathBuf {
+pub fn get_default_deployment_path(
+    manifest_path: &PathBuf,
+    network: &Option<StacksNetwork>,
+) -> PathBuf {
     let mut deployment_path = manifest_path.clone();
     deployment_path.pop();
     deployment_path.push("deployments");
@@ -238,7 +272,10 @@ pub fn get_default_deployment_path(manifest_path: &PathBuf, network: &Option<Sta
     deployment_path
 }
 
-pub fn read_or_default_to_generated_deployment(manifest_path: &PathBuf, network: &Option<StacksNetwork>) -> Result<DeploymentSpecification, String> {
+pub fn read_or_default_to_generated_deployment(
+    manifest_path: &PathBuf,
+    network: &Option<StacksNetwork>,
+) -> Result<DeploymentSpecification, String> {
     let default_deployment_file_path = get_default_deployment_path(manifest_path, network);
     let deployment = if default_deployment_file_path.exists() {
         load_deployment(manifest_path, &default_deployment_file_path)?
@@ -262,15 +299,22 @@ pub enum TransactionStatus {
     OnChain,
 }
 
-pub fn apply_on_chain_deployment(manifest_path: &PathBuf, deployment: &DeploymentSpecification, deployment_event_tx: Sender<DeploymentEvent>, deployment_command_rx: Receiver<DeploymentCommand>) {
-
+pub fn apply_on_chain_deployment(
+    manifest_path: &PathBuf,
+    deployment: &DeploymentSpecification,
+    deployment_event_tx: Sender<DeploymentEvent>,
+    deployment_command_rx: Receiver<DeploymentCommand>,
+) {
     let chain_config = ChainConfig::from_manifest_path(&manifest_path, &deployment.network);
     let delay_between_checks: u64 = 10;
     // Load deployers, deployment_fee_rate
     // Check fee, balances and deployers
 
     let mut batches = VecDeque::new();
-    let network = deployment.network.clone().expect("unable to retrieve network");
+    let network = deployment
+        .network
+        .clone()
+        .expect("unable to retrieve network");
     let deployment_fee_rate = chain_config.network.deployment_fee_rate;
     let mut accounts_cached_nonces: BTreeMap<String, u64> = BTreeMap::new();
     let mut accounts_lookup: BTreeMap<String, &AccountConfig> = BTreeMap::new();
@@ -291,7 +335,6 @@ pub fn apply_on_chain_deployment(manifest_path: &PathBuf, deployment: &Deploymen
     // Phase 1: we traverse the deployment plan and encode all the transactions,
     // keeping the order.
     for batch_spec in deployment.plan.batches.iter() {
-        
         let mut batch = Vec::new();
         for transaction in batch_spec.transactions.iter() {
             match transaction {
@@ -304,26 +347,37 @@ pub fn apply_on_chain_deployment(manifest_path: &PathBuf, deployment: &Deploymen
                     let issuer_address = tx.expected_sender.to_address();
                     let nonce = match accounts_cached_nonces.get(&issuer_address) {
                         Some(cached_nonce) => cached_nonce.clone(),
-                        None => {
-                            stacks_rpc
-                                .get_nonce(&issuer_address)
-                                .expect("Unable to retrieve account")
-                        }
+                        None => stacks_rpc
+                            .get_nonce(&issuer_address)
+                            .expect("Unable to retrieve account"),
                     };
                     let account = accounts_lookup.get(&issuer_address).unwrap();
-                    
-                    let stacks_transaction = match encode_contract_publish(&tx.contract, &tx.source, *account, nonce, deployment_fee_rate, &network) {
+
+                    let stacks_transaction = match encode_contract_publish(
+                        &tx.contract,
+                        &tx.source,
+                        *account,
+                        nonce,
+                        deployment_fee_rate,
+                        &network,
+                    ) {
                         Ok(res) => res,
                         Err(e) => {
                             let _ = deployment_event_tx.send(DeploymentEvent::Interrupted(e));
-                            return
+                            return;
                         }
                     };
 
                     accounts_cached_nonces.insert(issuer_address.clone(), nonce + 1);
-                    batch.push((tx.expected_sender.clone(), tx.contract.clone(), stacks_transaction, TransactionStatus::Encoded));
+                    batch.push((
+                        tx.expected_sender.clone(),
+                        tx.contract.clone(),
+                        stacks_transaction,
+                        TransactionStatus::Encoded,
+                    ));
                 }
-                TransactionSpecification::EmulatedContractPublish(_) | TransactionSpecification::EmulatedContractCall(_) => {}
+                TransactionSpecification::EmulatedContractPublish(_)
+                | TransactionSpecification::EmulatedContractCall(_) => {}
             }
         }
 
@@ -333,8 +387,10 @@ pub fn apply_on_chain_deployment(manifest_path: &PathBuf, deployment: &Deploymen
     let _cmd = match deployment_command_rx.recv() {
         Ok(cmd) => cmd,
         Err(_) => {
-            let _ = deployment_event_tx.send(DeploymentEvent::Interrupted("deployment aborted - broken channel".to_string()));
-            return
+            let _ = deployment_event_tx.send(DeploymentEvent::Interrupted(
+                "deployment aborted - broken channel".to_string(),
+            ));
+            return;
         }
     };
 
@@ -346,11 +402,12 @@ pub fn apply_on_chain_deployment(manifest_path: &PathBuf, deployment: &Deploymen
         for (sender, contract_name, tx, status) in batch.into_iter() {
             let _ = match stacks_rpc.post_transaction(tx) {
                 Ok(res) => {
-                    ongoing_batch.insert(res.txid, (sender, contract_name, TransactionStatus::Broadcasted));
+                    ongoing_batch.insert(
+                        res.txid,
+                        (sender, contract_name, TransactionStatus::Broadcasted),
+                    );
                 }
-                Err(e) => {
-                    return
-                }
+                Err(e) => return,
             };
         }
 
@@ -358,15 +415,13 @@ pub fn apply_on_chain_deployment(manifest_path: &PathBuf, deployment: &Deploymen
             let new_block_height = match stacks_rpc.get_info() {
                 Ok(info) => info.burn_block_height,
                 _ => {
-                    std::thread::sleep(std::time::Duration::from_secs(
-                        delay_between_checks.into(),
-                    ));
+                    std::thread::sleep(std::time::Duration::from_secs(delay_between_checks.into()));
                     continue;
                 }
             };
 
-            // If no block has been mined since `delay_between_checks`, 
-            // avoid flooding the stacks-node with status update requests. 
+            // If no block has been mined since `delay_between_checks`,
+            // avoid flooding the stacks-node with status update requests.
             if new_block_height <= current_block_height {
                 std::thread::sleep(std::time::Duration::from_secs(delay_between_checks.into()));
                 continue;
@@ -379,15 +434,16 @@ pub fn apply_on_chain_deployment(manifest_path: &PathBuf, deployment: &Deploymen
             for (txid, (deployer, contract_name, status)) in ongoing_batch.iter_mut() {
                 match *status {
                     TransactionStatus::Broadcasted => {
-                        let res = stacks_rpc.get_contract_source(&deployer.to_address(), &contract_name);
+                        let res =
+                            stacks_rpc.get_contract_source(&deployer.to_address(), &contract_name);
                         if let Ok(_contract) = res {
                             *status = TransactionStatus::OnChain;
                         } else {
                             keep_looping = true;
                             break;
-                        }    
+                        }
                     }
-                    _ => {}            
+                    _ => {}
                 }
             }
             if !keep_looping {
@@ -395,7 +451,7 @@ pub fn apply_on_chain_deployment(manifest_path: &PathBuf, deployment: &Deploymen
             }
         }
     }
-    
+
     // if let Some(devnet_event_tx) = devnet_event_tx {
     //     let _ = devnet_event_tx.send(DevnetEvent::ProtocolDeployed);
     // } else {
@@ -416,21 +472,29 @@ pub fn check_deployments(manifest_path: &PathBuf) -> Result<(), String> {
             Ok(spec) => spec,
             Err(msg) => {
                 println!("{} {} syntax incorrect\n{}", red!("x"), relative_path, msg);
-                continue;        
+                continue;
             }
         };
-        println!("{} {} succesfully checked", green!("✔"), relative_path);    
+        println!("{} {} succesfully checked", green!("✔"), relative_path);
     }
     Ok(())
 }
 
-pub fn load_deployment(manifest_path: &PathBuf, deployment_path: &PathBuf) -> Result<DeploymentSpecification, String> {
+pub fn load_deployment(
+    manifest_path: &PathBuf,
+    deployment_path: &PathBuf,
+) -> Result<DeploymentSpecification, String> {
     let mut base_path = manifest_path.clone();
     base_path.pop();
     let spec = match DeploymentSpecification::from_config_file(&deployment_path, &base_path) {
         Ok(spec) => spec,
         Err(msg) => {
-            return Err(format!("{} {} syntax incorrect\n{}", red!("x"), deployment_path.display(), msg));
+            return Err(format!(
+                "{} {} syntax incorrect\n{}",
+                red!("x"),
+                deployment_path.display(),
+                msg
+            ));
         }
     };
     Ok(spec)
@@ -443,12 +507,13 @@ fn get_deployments_files(manifest_path: &PathBuf) -> Result<Vec<(PathBuf, String
     hooks_home.push("deployments");
     let paths = match fs::read_dir(&hooks_home) {
         Ok(paths) => paths,
-        Err(_) => return Ok(vec![])
+        Err(_) => return Ok(vec![]),
     };
     let mut hook_paths = vec![];
     for path in paths {
         let file = path.unwrap().path();
-        let is_extension_valid = file.extension()
+        let is_extension_valid = file
+            .extension()
             .and_then(|ext| ext.to_str())
             .and_then(|ext| Some(ext == "yml" || ext == "yaml"));
 
@@ -462,15 +527,21 @@ fn get_deployments_files(manifest_path: &PathBuf) -> Result<Vec<(PathBuf, String
     Ok(hook_paths)
 }
 
-pub fn write_deployment(deployment: &DeploymentSpecification, target_path: &PathBuf) -> Result<(), String> {
+pub fn write_deployment(
+    deployment: &DeploymentSpecification,
+    target_path: &PathBuf,
+) -> Result<(), String> {
+    let mut base_dir = target_path.clone();
+    base_dir.pop();
+    if !base_dir.exists() {
+        let _ = std::fs::create_dir(base_dir);
+    }
 
     let file = deployment.to_specification_file();
 
     let content = match serde_yaml::to_string(&file) {
         Ok(res) => res,
-        Err(err) => {
-            return Err(format!("unable to serialize deployment {}", err))
-        }
+        Err(err) => return Err(format!("unable to serialize deployment {}", err)),
     };
 
     let mut file = match File::create(&target_path) {
@@ -496,15 +567,20 @@ pub fn write_deployment(deployment: &DeploymentSpecification, target_path: &Path
     Ok(())
 }
 
-pub fn generate_default_deployment(manifest_path: &PathBuf, network: &Option<StacksNetwork>) -> Result<DeploymentSpecification, String> {
-
+pub fn generate_default_deployment(
+    manifest_path: &PathBuf,
+    network: &Option<StacksNetwork>,
+) -> Result<DeploymentSpecification, String> {
     let mut project_config = ProjectManifest::from_path(&manifest_path);
     let chain_config = ChainConfig::from_manifest_path(&manifest_path, &network);
 
     let default_deployer = match chain_config.accounts.get("deployer") {
         Some(deployer) => deployer,
         None => {
-            return Err(format!("{} unable to retrieve default deployer account", red!("x")));
+            return Err(format!(
+                "{} unable to retrieve default deployer account",
+                red!("x")
+            ));
         }
     };
 
@@ -525,25 +601,35 @@ pub fn generate_default_deployment(manifest_path: &PathBuf, network: &Option<Sta
             let contract_id = match QualifiedContractIdentifier::parse(&requirement.contract_id) {
                 Ok(contract_id) => contract_id,
                 Err(e) => {
-                    return Err(format!("malformatted contract_id: {}", requirement.contract_id))
+                    return Err(format!(
+                        "malformatted contract_id: {}",
+                        requirement.contract_id
+                    ))
                 }
             };
             queue.push_front(contract_id);
         }
 
-        let mut handled: HashMap<QualifiedContractIdentifier, (ContractAST, String, HashSet<QualifiedContractIdentifier>)> = HashMap::new();
+        let mut handled: HashMap<
+            QualifiedContractIdentifier,
+            (ContractAST, String, HashSet<QualifiedContractIdentifier>),
+        > = HashMap::new();
 
         let settings = SessionSettings::default();
         let mut session = Session::new(settings);
 
-        while let Some(contract_id) = queue.pop_front() {        
+        while let Some(contract_id) = queue.pop_front() {
             // Extract principal from contract_id
             if handled.contains_key(&contract_id) {
                 continue;
             }
-            
+
             // Download the code
-            let (source, path) = requirements::retrieve_contract(&contract_id, true, Some(default_cache_path.clone()))?;
+            let (source, path) = requirements::retrieve_contract(
+                &contract_id,
+                true,
+                Some(default_cache_path.clone()),
+            )?;
 
             let data = EmulatedContractPublishSpecification {
                 contract: contract_id.name.clone(),
@@ -553,15 +639,13 @@ pub fn generate_default_deployment(manifest_path: &PathBuf, network: &Option<Sta
             };
             contracts.insert(contract_id.clone(), data);
 
-            let (ast, _, _) = session.interpreter.build_ast(
-                contract_id.clone(),
-                source.clone(),
-                2,
-            );
+            let (ast, _, _) = session
+                .interpreter
+                .build_ast(contract_id.clone(), source.clone(), 2);
             let mut contract_asts = HashMap::new();
             contract_asts.insert(contract_id.clone(), ast.clone());
             let dependencies =
-            ASTDependencyDetector::detect_dependencies(&contract_asts, &BTreeMap::new());
+                ASTDependencyDetector::detect_dependencies(&contract_asts, &BTreeMap::new());
 
             for (contract_id, dependencies) in dependencies.into_iter() {
                 for dependency in dependencies.iter() {
@@ -575,21 +659,18 @@ pub fn generate_default_deployment(manifest_path: &PathBuf, network: &Option<Sta
         let mut unordered_dependencies = HashMap::new();
         for (contract_id, (_, _, dependencies)) in handled.iter() {
             unordered_dependencies.insert(contract_id.clone(), dependencies.clone());
-        } 
+        }
 
+        let ordered_contracts_ids =
+            match ASTDependencyDetector::order_contracts(&unordered_dependencies) {
+                Ok(ordered_contracts) => ordered_contracts,
+                Err(e) => return Err(format!("unable order contracts {}", e)),
+            };
 
-        let ordered_contracts_ids = match ASTDependencyDetector::order_contracts(&unordered_dependencies) {
-            Ok(ordered_contracts) => ordered_contracts,
-            Err(e) => {
-                return Err(format!(
-                    "unable order contracts {}",
-                    e
-                ))
-            }
-        };
-    
         for contract_id in ordered_contracts_ids.iter() {
-            let data = contracts.remove(contract_id).expect("unable to retrieve contract");
+            let data = contracts
+                .remove(contract_id)
+                .expect("unable to retrieve contract");
             let tx = TransactionSpecification::EmulatedContractPublish(data);
             transactions.push(tx);
         }
@@ -598,10 +679,9 @@ pub fn generate_default_deployment(manifest_path: &PathBuf, network: &Option<Sta
     let mut contracts = HashMap::new();
 
     for (name, config) in project_config.contracts.iter() {
-
         let contract = match ContractName::try_from(name.to_string()) {
             Ok(res) => res,
-            Err(_) => return Err(format!("unable to use {} as a valid contract name", name))
+            Err(_) => return Err(format!("unable to use {} as a valid contract name", name)),
         };
 
         let deployer = match config.deployer {
@@ -609,20 +689,29 @@ pub fn generate_default_deployment(manifest_path: &PathBuf, network: &Option<Sta
                 let deployer = match chain_config.accounts.get(deployer) {
                     Some(deployer) => deployer,
                     None => {
-                        return Err(format!("{} unable to retrieve account '{}'", red!("x"), deployer));
+                        return Err(format!(
+                            "{} unable to retrieve account '{}'",
+                            red!("x"),
+                            deployer
+                        ));
                     }
                 };
                 deployer
             }
-            None => default_deployer
+            None => default_deployer,
         };
 
         let emulated_sender = match PrincipalData::parse_standard_principal(&deployer.address) {
             Ok(res) => res,
-            Err(_) => return Err(format!("unable to turn emulated_sender {} as a valid Stacks address", deployer.address))
+            Err(_) => {
+                return Err(format!(
+                    "unable to turn emulated_sender {} as a valid Stacks address",
+                    deployer.address
+                ))
+            }
         };
 
-        let source = match  std::fs::read_to_string(&config.path) {
+        let source = match std::fs::read_to_string(&config.path) {
             Ok(code) => code,
             Err(err) => {
                 return Err(format!(
@@ -639,7 +728,10 @@ pub fn generate_default_deployment(manifest_path: &PathBuf, network: &Option<Sta
             relative_path: config.path.clone(),
         };
 
-        let contract_id = QualifiedContractIdentifier::new(contract.emulated_sender.clone(), contract.contract.clone());
+        let contract_id = QualifiedContractIdentifier::new(
+            contract.emulated_sender.clone(),
+            contract.contract.clone(),
+        );
 
         contracts.insert(contract_id, contract);
     }
@@ -650,28 +742,23 @@ pub fn generate_default_deployment(manifest_path: &PathBuf, network: &Option<Sta
     let mut contract_asts = HashMap::new();
 
     for (contract_id, contract) in contracts.iter() {
-        let (ast, _, _) = session.interpreter.build_ast(
-            contract_id.clone(),
-            contract.source.clone(),
-            2,
-        );
+        let (ast, _, _) =
+            session
+                .interpreter
+                .build_ast(contract_id.clone(), contract.source.clone(), 2);
         contract_asts.insert(contract_id.clone(), ast);
     }
 
-    let dependencies =
-    ASTDependencyDetector::detect_dependencies(&contract_asts, &BTreeMap::new());
+    let dependencies = ASTDependencyDetector::detect_dependencies(&contract_asts, &BTreeMap::new());
     let ordered_contracts_ids = match ASTDependencyDetector::order_contracts(&dependencies) {
         Ok(ordered_contracts) => ordered_contracts,
-        Err(e) => {
-            return Err(format!(
-                "unable order contracts {}",
-                e
-            ))
-        }
+        Err(e) => return Err(format!("unable order contracts {}", e)),
     };
 
     for contract_id in ordered_contracts_ids.iter() {
-        let data = contracts.remove(contract_id).expect("unable to retrieve contract");
+        let data = contracts
+            .remove(contract_id)
+            .expect("unable to retrieve contract");
         let tx = if network.is_none() {
             TransactionSpecification::EmulatedContractPublish(data)
         } else {
@@ -692,16 +779,20 @@ pub fn generate_default_deployment(manifest_path: &PathBuf, network: &Option<Sta
     for (id, transactions) in transactions.chunks(25).enumerate() {
         batches.push(TransactionsBatchSpecification {
             id: id,
-            transactions: transactions.to_vec()
+            transactions: transactions.to_vec(),
         })
     }
 
     let mut wallets = vec![];
     for (label, account) in chain_config.accounts.into_iter() {
-
         let principal = match PrincipalData::parse_standard_principal(&account.address) {
             Ok(res) => res,
-            Err(_) => return Err(format!("unable to parse wallet {} in a valid Stacks address", account.address))
+            Err(_) => {
+                return Err(format!(
+                    "unable to parse wallet {} in a valid Stacks address",
+                    account.address
+                ))
+            }
         };
 
         wallets.push(WalletSpecification {
@@ -712,11 +803,7 @@ pub fn generate_default_deployment(manifest_path: &PathBuf, network: &Option<Sta
     }
 
     // TODO(lgalabru): use project_config.repl_settings.include_boot_contracts.clone()
-    let boot_contracts = vec![
-        "pox".to_string(),
-        "costs-v2".to_string(),
-        "bns".to_string(),
-    ];
+    let boot_contracts = vec!["pox".to_string(), "costs-v2".to_string(), "bns".to_string()];
 
     let deployment = DeploymentSpecification {
         id: 0,
@@ -747,12 +834,11 @@ pub fn generate_default_deployment(manifest_path: &PathBuf, network: &Option<Sta
     Ok(deployment)
 }
 
-pub fn create_default_test_deployment(manifest_path: &PathBuf) -> Result<DeploymentSpecification, String> {
+pub fn create_default_test_deployment(
+    manifest_path: &PathBuf,
+) -> Result<DeploymentSpecification, String> {
     let deployment = generate_default_deployment(&manifest_path, &None)?;
     Ok(deployment)
 }
 
-
-pub fn display_deployment(deployment: &DeploymentSpecification) {
-
-}
+pub fn display_deployment(deployment: &DeploymentSpecification) {}
