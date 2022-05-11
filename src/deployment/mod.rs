@@ -1,5 +1,5 @@
 mod requirements;
-mod types;
+pub mod types;
 mod ui;
 
 use self::types::{
@@ -13,9 +13,9 @@ use crate::deployment::types::{
     TransactionsBatchSpecificationFile,
 };
 use crate::integrate::DevnetEvent;
-use crate::poke::{load_session, load_session_settings};
 use crate::types::{
-    AccountConfig, ChainConfig, ChainsCoordinatorCommand, ProjectManifest, StacksNetwork,
+    AccountConfig, ChainConfig, ChainsCoordinatorCommand, ProjectManifest, ProjectManifestFile,
+    StacksNetwork,
 };
 use crate::utils::mnemonic;
 use crate::utils::stacks::StacksRpc;
@@ -27,6 +27,7 @@ use clarity_repl::clarity::codec::transaction::{
     TransactionSmartContract, TransactionSpendingCondition,
 };
 use clarity_repl::clarity::codec::StacksMessageCodec;
+use clarity_repl::clarity::diagnostic::Diagnostic;
 use clarity_repl::clarity::types::{
     PrincipalData, QualifiedContractIdentifier, StandardPrincipalData,
 };
@@ -48,8 +49,8 @@ use clarity_repl::clarity::{
 };
 use clarity_repl::clarity::{ClarityName, ContractName};
 use clarity_repl::repl::settings::InitialContract;
-use clarity_repl::repl::Session;
 use clarity_repl::repl::SessionSettings;
+use clarity_repl::repl::{ExecutionResult, Session};
 use libsecp256k1::{PublicKey, SecretKey};
 use serde_yaml;
 use std::collections::VecDeque;
@@ -177,25 +178,35 @@ pub fn encode_contract_publish(
     Ok(signed_tx)
 }
 
-pub fn setup_session_from_deployment(
+pub fn setup_session_with_deployment(
+    manifest_path: &PathBuf,
     deployment: &DeploymentSpecification,
-) -> Result<Session, String> {
-    use crate::deployment::types::TransactionSpecification;
-    use clarity_repl::repl::SessionSettings;
+) -> (
+    Session,
+    BTreeMap<QualifiedContractIdentifier, Result<ExecutionResult, Vec<Diagnostic>>>,
+) {
+    let mut session = initiate_session_from_deployment(&manifest_path, deployment);
+    update_session_with_genesis_accounts(&mut session, deployment);
+    let results = update_session_with_contracts(&mut session, deployment);
+    (session, results)
+}
 
+pub fn initiate_session_from_deployment(
+    manifest_path: &PathBuf,
+    deployment: &DeploymentSpecification,
+) -> Session {
+    let manifest = ProjectManifest::from_path(manifest_path);
     let mut settings = SessionSettings::default();
+    settings.repl_settings = manifest.repl_settings.clone();
+    settings.disk_cache_enabled = true;
     let mut session = Session::new(settings);
+    session
+}
 
-    // settings.include_boot_contracts = vec![
-    //     "pox".to_string(),
-    //     "costs-v1".to_string(),
-    //     "costs-v2".to_string(),
-    //     "bns".to_string(),
-    // ];
-    // settings.initial_deployer = initial_deployer;
-    // settings.repl_settings = project_config.repl_settings.clone();
-    // settings.disk_cache_enabled = true;
-
+pub fn update_session_with_genesis_accounts(
+    session: &mut Session,
+    deployment: &DeploymentSpecification,
+) {
     if let Some(ref genesis) = deployment.genesis {
         for wallet in genesis.wallets.iter() {
             let _ = session.interpreter.mint_stx_balance(
@@ -204,7 +215,13 @@ pub fn setup_session_from_deployment(
             );
         }
     }
+}
 
+pub fn update_session_with_contracts(
+    session: &mut Session,
+    deployment: &DeploymentSpecification,
+) -> BTreeMap<QualifiedContractIdentifier, Result<ExecutionResult, Vec<Diagnostic>>> {
+    let mut results = BTreeMap::new();
     for batch in deployment.plan.batches.iter() {
         for transaction in batch.transactions.iter() {
             match transaction {
@@ -213,13 +230,18 @@ pub fn setup_session_from_deployment(
                 TransactionSpecification::EmulatedContractPublish(tx) => {
                     let default_tx_sender = session.get_tx_sender();
                     session.set_tx_sender(tx.emulated_sender.to_string());
-                    let _ = session.interpret(
+                    let result = session.interpret(
                         tx.source.clone(),
                         Some(tx.contract.to_string()),
                         false,
                         false,
                         None,
                     );
+                    let contract_id = QualifiedContractIdentifier::new(
+                        tx.emulated_sender.clone(),
+                        tx.contract.clone(),
+                    );
+                    results.insert(contract_id, result);
                     session.set_tx_sender(default_tx_sender);
                 }
                 TransactionSpecification::EmulatedContractCall(tx) => {
@@ -235,8 +257,7 @@ pub fn setup_session_from_deployment(
         }
         session.advance_chain_tip(1);
     }
-
-    Ok(session)
+    results
 }
 
 pub fn get_absolute_deployment_path(
@@ -598,6 +619,7 @@ pub fn generate_default_deployment(
     };
 
     let mut transactions = vec![];
+    let mut contracts_map = BTreeMap::new();
 
     // Only handle requirements in test environments
     if network.is_none() && project_config.project.requirements.is_some() {
@@ -768,10 +790,14 @@ pub fn generate_default_deployment(
         Err(e) => return Err(format!("unable order contracts {}", e)),
     };
 
-    for contract_id in ordered_contracts_ids.iter() {
+    for contract_id in ordered_contracts_ids.into_iter() {
         let data = contracts
             .remove(contract_id)
             .expect("unable to retrieve contract");
+        contracts_map.insert(
+            contract_id.clone(),
+            (data.source.clone(), data.relative_path.clone()),
+        );
         let tx = if network.is_none() {
             TransactionSpecification::EmulatedContractPublish(data)
         } else {
@@ -831,7 +857,8 @@ pub fn generate_default_deployment(
             } else { None },
         plan: TransactionPlanSpecification {
             batches
-        }
+        },
+        contracts: contracts_map,
     };
 
     // settings.include_boot_contracts = vec![

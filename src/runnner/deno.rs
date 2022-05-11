@@ -50,7 +50,11 @@ use swc_common::comments::CommentKind;
 
 mod sessions {
     use super::TransactionArgs;
-    use crate::poke::load_session_settings;
+    use crate::deployment::types::DeploymentSpecification;
+    use crate::deployment::{
+        initiate_session_from_deployment, read_or_default_to_generated_deployment,
+        update_session_with_contracts, update_session_with_genesis_accounts,
+    };
     use crate::types::{ChainConfig, ProjectManifest, StacksNetwork};
     use clarity_repl::clarity::analysis::ContractAnalysis;
     use clarity_repl::repl::settings::Account;
@@ -63,7 +67,7 @@ mod sessions {
     use std::sync::Mutex;
 
     lazy_static! {
-        pub static ref SESSIONS: Mutex<HashMap<u32, (String, Session)>> =
+        pub static ref SESSIONS: Mutex<HashMap<u32, (String, Session, DeploymentSpecification)>> =
             Mutex::new(HashMap::new());
         pub static ref SESSION_TEMPLATE: Mutex<Vec<Session>> = Mutex::new(vec![]);
     }
@@ -87,22 +91,24 @@ mod sessions {
         let can_use_cache = !includes_pre_deployment_steps && session_templated;
         let should_update_cache = !includes_pre_deployment_steps;
 
+        let deployment = match read_or_default_to_generated_deployment(&manifest_path, &None) {
+            Ok(deployment) => deployment,
+            Err(message) => {
+                println!("{}", message);
+                std::process::exit(1);
+            }
+        };
+
         let (mut session, contracts) = if !can_use_cache {
-            let (mut session_settings, _, _) =
-                load_session_settings(&manifest_path, &StacksNetwork::Devnet, true)
-                    .expect("Unable to load manifest");
-            session_settings.lazy_initial_contracts_interpretation = includes_pre_deployment_steps;
-            let mut session = Session::new(session_settings.clone());
-            let (_, contracts) = match session.start() {
-                Ok(res) => res,
-                Err(e) => {
-                    std::process::exit(1);
-                }
-            };
+            let mut session = initiate_session_from_deployment(manifest_path, &deployment);
+            update_session_with_genesis_accounts(&mut session, &deployment);
+            if !includes_pre_deployment_steps {
+                update_session_with_contracts(&mut session, &deployment);
+            }
             if should_update_cache {
                 SESSION_TEMPLATE.lock().unwrap().push(session.clone());
             }
-            (session, contracts)
+            (session, vec![])
         } else {
             let session = SESSION_TEMPLATE.lock().unwrap().last().unwrap().clone();
             let contracts = session.initial_contracts_analysis.clone();
@@ -114,7 +120,7 @@ mod sessions {
         }
 
         let accounts = session.settings.initial_accounts.clone();
-        sessions.insert(session_id, (name, session));
+        sessions.insert(session_id, (name, session, deployment));
         Ok((session_id, accounts, contracts))
     }
 
@@ -123,7 +129,7 @@ mod sessions {
     ) -> Result<(u32, Vec<Account>, Vec<(ContractAnalysis, String, String)>), AnyError> {
         let mut sessions = SESSIONS.lock().unwrap();
         match sessions.get_mut(&session_id) {
-            Some((_, session)) => {
+            Some((_, session, deployment)) => {
                 let (_, contracts) = session
                     .interpret_initial_contracts()
                     .expect("Unable to load contracts");
@@ -149,78 +155,19 @@ mod sessions {
         let can_use_cache = transactions.is_empty() && session_templated;
         let should_update_cache = transactions.is_empty();
 
+        let deployment = match read_or_default_to_generated_deployment(&manifest_path, &None) {
+            Ok(deployment) => deployment,
+            Err(message) => {
+                println!("{}", message);
+                std::process::exit(1);
+            }
+        };
+
         let (mut session, contracts) = if !can_use_cache {
-            let mut settings = repl::SessionSettings::default();
-            let mut project_path = manifest_path.clone();
-            project_path.pop();
+            let mut session = initiate_session_from_deployment(manifest_path, &deployment);
+            update_session_with_genesis_accounts(&mut session, &deployment);
+            update_session_with_contracts(&mut session, &deployment);
 
-            let mut chain_config_path = project_path.clone();
-            chain_config_path.push("settings");
-            chain_config_path.push("Devnet.toml");
-
-            let project_config = ProjectManifest::from_path(manifest_path);
-            let chain_config = ChainConfig::from_path(&chain_config_path, &StacksNetwork::Devnet);
-
-            let mut deployer_address = None;
-            let mut initial_deployer = None;
-
-            for (name, account) in chain_config.accounts.iter() {
-                let account = repl::settings::Account {
-                    name: name.clone(),
-                    balance: account.balance,
-                    address: account.address.clone(),
-                };
-                if name == "deployer" {
-                    initial_deployer = Some(account.clone());
-                    deployer_address = Some(account.address.clone());
-                }
-                settings.initial_accounts.push(account);
-            }
-
-            for tx in transactions.iter() {
-                let deployer = Some(tx.sender.clone());
-                if let Some(ref deploy_contract) = tx.deploy_contract {
-                    settings
-                        .initial_contracts
-                        .push(repl::settings::InitialContract {
-                            code: deploy_contract.code.clone(),
-                            path: "".into(),
-                            name: Some(deploy_contract.name.clone()),
-                            deployer,
-                        });
-                }
-                // if let Some(ref contract_call) tx.contract_call {
-                // TODO(lgalabru): initial_tx_sender
-                //   let code = format!("(contract-call? '{}.{} {} {})", initial_tx_sender, contract_call.contract, contract_call.method, contract_call.args.join(" "));
-                //   settings
-                //     .initial_contracts
-                //     .push(repl::settings::InitialContract {
-                //         code: code,
-                //         name: Some(name.clone()),
-                //         deployer: tx.sender.clone(),
-                //     });
-                // }
-            }
-
-            for (name, config) in &project_config.contracts {
-                let mut contract_path = project_path.clone();
-                contract_path.push(&config.path);
-
-                let code = fs::read_to_string(&contract_path).unwrap();
-
-                settings
-                    .initial_contracts
-                    .push(repl::settings::InitialContract {
-                        code: code,
-                        path: contract_path.to_str().unwrap().into(),
-                        name: Some(name.clone()),
-                        deployer: deployer_address.clone(),
-                    });
-            }
-            settings.initial_deployer = initial_deployer;
-            settings.repl_settings = project_config.repl_settings;
-            settings.include_boot_contracts = project_config.project.boot_contracts;
-            let mut session = Session::new(settings.clone());
             let (_, contracts) = match session.start() {
                 Ok(res) => res,
                 Err(e) => {
@@ -239,7 +186,7 @@ mod sessions {
 
         session.advance_chain_tip(1);
         let accounts = session.settings.initial_accounts.clone();
-        sessions.insert(session_id, (name, session));
+        sessions.insert(session_id, (name, session, deployment));
         Ok((session_id, accounts, contracts))
     }
 
@@ -253,7 +200,7 @@ mod sessions {
                 println!("Error: unable to retrieve session");
                 panic!()
             }
-            Some((name, ref mut session)) => handler(name.as_str(), session),
+            Some((name, ref mut session, deployment)) => handler(name.as_str(), session),
         }
     }
 }
@@ -501,7 +448,7 @@ pub async fn do_run_scripts(
     if include_coverage {
         let mut coverage_reporter = CoverageReporter::new();
         let sessions = sessions::SESSIONS.lock().unwrap();
-        for (session_id, (name, session)) in sessions.iter() {
+        for (session_id, (name, session, deployment)) in sessions.iter() {
             for contract in session.settings.initial_contracts.iter() {
                 if let Some(ref name) = contract.name {
                     if contract.path != "" {
@@ -613,7 +560,7 @@ fn display_costs_report() {
     let mut contracts_costs: BTreeMap<&String, BTreeMap<&String, Vec<FunctionCosts>>> =
         BTreeMap::new();
 
-    for (session_id, (name, session)) in sessions.iter() {
+    for (session_id, (name, session, deployment)) in sessions.iter() {
         for report in session.costs_reports.iter() {
             let key = report.contract_id.to_string();
             match consolidated.entry(key) {

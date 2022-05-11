@@ -331,6 +331,8 @@ pub struct DeploymentSpecification {
     #[serde(rename = "start-block")]
     pub start_block: u64,
     pub plan: TransactionPlanSpecification,
+    #[serde(skip_serializing)]
+    pub contracts: BTreeMap<QualifiedContractIdentifier, (String, String)>,
 }
 
 impl DeploymentSpecification {
@@ -389,6 +391,7 @@ impl DeploymentSpecification {
         network: Option<StacksNetwork>,
         base_path: &PathBuf,
     ) -> Result<DeploymentSpecification, String> {
+        let mut contracts = BTreeMap::new();
         let (plan, genesis) = match &network {
             None => {
                 let mut batches = vec![];
@@ -402,7 +405,10 @@ impl DeploymentSpecification {
                                     TransactionSpecification::EmulatedContractCall(EmulatedContractCallSpecification::from_specifications(spec)?)
                                 }
                                 TransactionSpecificationFile::EmulatedContractPublish(spec) => {
-                                    TransactionSpecification::EmulatedContractPublish(EmulatedContractPublishSpecification::from_specifications(spec, base_path)?)
+                                    let spec = EmulatedContractPublishSpecification::from_specifications(spec, base_path)?;
+                                    let contract_id = QualifiedContractIdentifier::new(spec.emulated_sender.clone(), spec.contract.clone());
+                                    contracts.insert(contract_id, (spec.source.clone(), spec.relative_path.clone()));
+                                    TransactionSpecification::EmulatedContractPublish(spec)
                                 }
                                 _ => {
                                     return Err(format!("{} only supports transactions of type 'emulated-contract-call' and 'emulated-contract-publish", specs.network.to_lowercase()))
@@ -432,7 +438,10 @@ impl DeploymentSpecification {
                                     TransactionSpecification::ContractCall(ContractCallSpecification::from_specifications(spec)?)
                                 }
                                 TransactionSpecificationFile::ContractPublish(spec) => {
-                                    TransactionSpecification::ContractPublish(ContractPublishSpecification::from_specifications(spec, base_path)?)
+                                    let spec = ContractPublishSpecification::from_specifications(spec, base_path)?;
+                                    let contract_id = QualifiedContractIdentifier::new(spec.expected_sender.clone(), spec.contract.clone());
+                                    contracts.insert(contract_id, (spec.source.clone(), spec.relative_path.clone()));
+                                    TransactionSpecification::ContractPublish(spec)
                                 }
                                 _ => {
                                     return Err(format!("{} only supports transactions of type 'contract-call' and 'contract-publish", specs.network.to_lowercase()))
@@ -456,6 +465,7 @@ impl DeploymentSpecification {
             genesis,
             start_block: specs.start_block.unwrap_or(0),
             plan,
+            contracts,
         })
     }
 

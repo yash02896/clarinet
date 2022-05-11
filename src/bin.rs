@@ -21,7 +21,6 @@ mod generate;
 mod indexer;
 mod integrate;
 mod lsp;
-mod poke;
 mod runnner;
 mod types;
 mod utils;

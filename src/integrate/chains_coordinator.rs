@@ -1,9 +1,11 @@
 use super::DevnetEvent;
-use crate::deployment::{apply_on_chain_deployment, read_or_default_to_generated_deployment};
+use crate::deployment::{
+    apply_on_chain_deployment, read_or_default_to_generated_deployment,
+    setup_session_with_deployment,
+};
 use crate::indexer::{chains, Indexer, IndexerConfig};
 use crate::integrate::{MempoolAdmissionData, ServiceStatusData, Status};
-use crate::poke::load_session;
-use crate::types::{self, AccountConfig, DevnetConfig};
+use crate::types::{self, AccountConfig, ChainConfig, DevnetConfig};
 use crate::types::{BitcoinChainEvent, ChainsCoordinatorCommand, StacksChainEvent, StacksNetwork};
 use crate::utils;
 use crate::utils::stacks::{transactions, PoxInfo, StacksRpc};
@@ -78,23 +80,28 @@ pub struct BitcoinRPCRequest {
 impl StacksEventObserverConfig {
     pub fn new(devnet_config: DevnetConfig, manifest_path: PathBuf) -> Self {
         info!("Checking contracts...");
-        let (session, config) = match load_session(&manifest_path, false, &StacksNetwork::Devnet) {
-            Ok((session, config, _, _)) => (session, config),
-            Err((_, e)) => {
-                println!("{}", e);
+        let network = Some(StacksNetwork::Devnet);
+        let deployment = match read_or_default_to_generated_deployment(&manifest_path, &network) {
+            Ok(deployment) => deployment,
+            Err(message) => {
+                println!("{}", message);
                 std::process::exit(1);
             }
         };
 
+        let (session, _) = setup_session_with_deployment(&manifest_path, &deployment);
+
+        let chain_config = ChainConfig::from_manifest_path(&manifest_path, &network);
+
         StacksEventObserverConfig {
             devnet_config,
-            accounts: config.accounts.into_values().collect::<Vec<_>>(),
+            accounts: chain_config.accounts.into_values().collect::<Vec<_>>(),
             manifest_path,
             contracts_to_deploy: VecDeque::from_iter(
                 session.settings.initial_contracts.iter().map(|c| c.clone()),
             ),
             session,
-            deployment_fee_rate: config.network.deployment_fee_rate,
+            deployment_fee_rate: chain_config.network.deployment_fee_rate,
         }
     }
 
@@ -203,35 +210,8 @@ pub async fn start_chains_coordinator(
                 break;
             }
             Ok(ChainsCoordinatorCommand::Terminate(false)) => {
-                // Restart
-                devnet_event_tx
-                    .send(DevnetEvent::info("Reloading contracts".into()))
-                    .expect("Unable to terminate event observer");
-
-                let session = match load_session(&manifest_path, false, &StacksNetwork::Devnet) {
-                    Ok((session, _, _, _)) => session,
-                    Err((_, e)) => {
-                        devnet_event_tx
-                            .send(DevnetEvent::error(format!("Contracts invalid: {}", e)))
-                            .expect("Unable to terminate event observer");
-                        continue;
-                    }
-                };
-                let contracts_to_deploy = VecDeque::from_iter(
-                    session.settings.initial_contracts.iter().map(|c| c.clone()),
-                );
-                devnet_event_tx
-                    .send(DevnetEvent::success(format!(
-                        "{} contracts to deploy",
-                        contracts_to_deploy.len()
-                    )))
-                    .expect("Unable to terminate event observer");
-
-                should_deploy_protocol = true;
-                protocol_deployed = false;
-                if let Ok(mut init_status) = init_status_rw_lock.write() {
-                    init_status.should_deploy_protocol = true;
-                }
+                // Will be removed via https://github.com/hirosystems/clarinet/pull/340
+                unreachable!();
             }
             Ok(ChainsCoordinatorCommand::PublishInitialContracts) => {
                 if should_deploy_protocol {

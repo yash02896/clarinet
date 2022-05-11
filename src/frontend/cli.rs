@@ -4,7 +4,7 @@ use crate::deployment::{
 };
 use crate::deployment::{
     create_default_test_deployment, display_deployment, generate_default_deployment,
-    load_deployment, setup_session_from_deployment, write_deployment,
+    load_deployment, setup_session_with_deployment, write_deployment,
 };
 use crate::generate::{
     self,
@@ -12,11 +12,11 @@ use crate::generate::{
 };
 use crate::integrate::{self, DevnetOrchestrator};
 use crate::lsp::run_lsp;
-use crate::poke::load_session;
 use crate::runnner::run_scripts;
 use crate::types::{ProjectManifest, ProjectManifestFile, RequirementConfig, StacksNetwork};
 use clarity_repl::clarity::analysis::{AnalysisDatabase, ContractAnalysis};
 use clarity_repl::clarity::costs::LimitedCostTracker;
+use clarity_repl::clarity::diagnostic::Level;
 use clarity_repl::clarity::types::QualifiedContractIdentifier;
 use clarity_repl::{analysis, repl, Terminal};
 use std::collections::{BTreeSet, HashMap};
@@ -25,10 +25,21 @@ use std::io::{prelude::*, BufReader, Read};
 use std::path::PathBuf;
 use std::sync::mpsc::channel;
 use std::{env, process};
+use tower_lsp::lsp_types::DiagnosticSeverity;
 
 use clap::{IntoApp, Parser, Subcommand};
 use clap_generate::{Generator, Shell};
 use toml;
+
+macro_rules! pluralize {
+    ($value:expr, $word:expr) => {
+        if $value > 1 {
+            format!("{} {}s", $value, $word)
+        } else {
+            format!("{} {}", $value, $word)
+        }
+    };
+}
 
 #[cfg(feature = "telemetry")]
 use super::telemetry::{telemetry_report_event, DeveloperUsageDigest, DeveloperUsageEvent};
@@ -220,7 +231,7 @@ struct Console {
     /// Path to Clarinet.toml
     #[clap(long = "manifest-path")]
     pub manifest_path: Option<String>,
-    /// Path to Clarinet.toml
+    /// If specified, use this deployment file
     #[clap(long = "deployment-plan-path")]
     pub deployment_plan_path: Option<String>,
 }
@@ -233,6 +244,9 @@ struct Integrate {
     /// Display streams of logs instead of terminal UI dashboard
     #[clap(long = "no-dashboard")]
     pub no_dashboard: bool,
+    /// If specified, use this deployment file
+    #[clap(long = "deployment-plan-path")]
+    pub deployment_plan_path: Option<String>,
 }
 
 #[derive(Parser, PartialEq, Clone, Debug)]
@@ -251,6 +265,9 @@ struct Test {
     pub watch: bool,
     /// Test files to be included (defaults to all tests found under tests/)
     pub files: Vec<String>,
+    /// If specified, use this deployment file
+    #[clap(long = "deployment-plan-path")]
+    pub deployment_plan_path: Option<String>,
 }
 
 #[derive(Parser, PartialEq, Clone, Debug)]
@@ -270,6 +287,9 @@ struct Run {
     #[clap(long = "allow-read")]
     #[allow(dead_code)]
     pub allow_disk_read: bool,
+    /// If specified, use this deployment file
+    #[clap(long = "deployment-plan-path")]
+    pub deployment_plan_path: Option<String>,
 }
 
 #[derive(Parser, PartialEq, Clone, Debug)]
@@ -279,6 +299,9 @@ struct Check {
     pub manifest_path: Option<String>,
     /// If specified, check this file
     pub file: Option<String>,
+    /// If specified, use this deployment file
+    #[clap(long = "deployment-plan-path")]
+    pub deployment_plan_path: Option<String>,
 }
 
 #[derive(Parser, PartialEq, Clone, Debug)]
@@ -570,14 +593,7 @@ pub fn main() {
                 }
             };
 
-            let session = match setup_session_from_deployment(&deployment) {
-                Ok(settings) => settings,
-                Err(message) => {
-                    println!("{}", message);
-                    std::process::exit(1);
-                }
-            };
-
+            let (session, _) = setup_session_with_deployment(&manifest_path, &deployment);
             let mut terminal = Terminal::load(session);
             terminal.start();
 
@@ -667,54 +683,195 @@ pub fn main() {
         }
         Command::Check(cmd) => {
             let manifest_path = get_manifest_path_or_exit(cmd.manifest_path);
-            let start_repl = false;
-            let project_manifest =
-                match load_session(&manifest_path, start_repl, &StacksNetwork::Devnet) {
-                    Err((_, e)) => {
-                        println!("{}", e);
-                        return;
-                    }
-                    Ok((session, _, manifest, output)) => {
-                        if let Some(message) = output {
-                            println!("{}", message);
+
+            let res = match cmd.deployment_plan_path {
+                None => generate_default_deployment(&manifest_path, &None),
+                Some(path) => load_deployment(
+                    &manifest_path,
+                    &get_absolute_deployment_path(&manifest_path, &path),
+                ),
+            };
+
+            let deployment = match res {
+                Ok(deployment) => deployment,
+                Err(e) => {
+                    println!("error: {}", e);
+                    process::exit(1);
+                }
+            };
+
+            let (_, results) = setup_session_with_deployment(&manifest_path, &deployment);
+            let mut success = 0;
+            let mut warnings = 0;
+            let mut errors = 0;
+            let mut contracts_checked = 0;
+            let mut outputs = vec![];
+            for (contract_id, result) in results.into_iter() {
+                contracts_checked += 1;
+                match result {
+                    Ok(result) => {
+                        if result.diagnostics.is_empty() {
+                            success += 1;
+                            continue;
                         }
-                        println!(
-                            "{} Syntax of {} contract(s) successfully checked",
-                            green!("✔"),
-                            session.settings.initial_contracts.len()
-                        );
-                        manifest
+
+                        let (source, contract_path) = deployment
+                            .contracts
+                            .get(&contract_id)
+                            .expect("unable to retrieve contract");
+
+                        let lines = source.lines();
+                        let formatted_lines: Vec<String> = lines.map(|l| l.to_string()).collect();
+
+                        for diagnostic in result.diagnostics {
+                            match diagnostic.level {
+                                Level::Error => {
+                                    errors += 1;
+                                    outputs.push(format!(
+                                        "{}: {}",
+                                        red!("error"),
+                                        diagnostic.message
+                                    ));
+                                }
+                                Level::Warning => {
+                                    warnings += 1;
+                                    outputs.push(format!(
+                                        "{}: {}",
+                                        yellow!("warning"),
+                                        diagnostic.message
+                                    ));
+                                }
+                                Level::Note => {
+                                    outputs.push(format!(
+                                        "{}: {}",
+                                        green!("note:"),
+                                        diagnostic.message
+                                    ));
+                                    outputs.append(&mut diagnostic.output_code(&formatted_lines));
+                                    continue;
+                                }
+                            }
+                            if let Some(span) = diagnostic.spans.first() {
+                                outputs.push(format!(
+                                    "{} {}:{}:{}",
+                                    blue!("-->"),
+                                    contract_path,
+                                    span.start_line,
+                                    span.start_column
+                                ));
+                            }
+                            outputs.append(&mut diagnostic.output_code(&formatted_lines));
+
+                            if let Some(suggestion) = diagnostic.suggestion {
+                                outputs.push(format!("{}", suggestion));
+                            }
+                        }
                     }
-                };
+                    Err(diagnostics) => {
+                        let (source, contract_path) = deployment
+                            .contracts
+                            .get(&contract_id)
+                            .expect("unable to retrieve contract");
+                        let lines = source.lines();
+                        let formatted_lines: Vec<String> = lines.map(|l| l.to_string()).collect();
+
+                        for diagnostic in diagnostics {
+                            match diagnostic.level {
+                                Level::Error => {
+                                    errors += 1;
+                                    outputs.push(format!(
+                                        "{}: {}",
+                                        red!("error"),
+                                        diagnostic.message
+                                    ));
+                                }
+                                Level::Warning => {
+                                    warnings += 1;
+                                    outputs.push(format!(
+                                        "{}: {}",
+                                        yellow!("warning"),
+                                        diagnostic.message
+                                    ));
+                                }
+                                Level::Note => {
+                                    outputs.push(format!(
+                                        "{}: {}",
+                                        green!("note:"),
+                                        diagnostic.message
+                                    ));
+                                    outputs.append(&mut diagnostic.output_code(&formatted_lines));
+                                    continue;
+                                }
+                            }
+                            if let Some(span) = diagnostic.spans.first() {
+                                outputs.push(format!(
+                                    "{} {}:{}:{}",
+                                    blue!("-->"),
+                                    contract_path,
+                                    span.start_line,
+                                    span.start_column
+                                ));
+                            }
+                            outputs.append(&mut diagnostic.output_code(&formatted_lines));
+
+                            if let Some(suggestion) = diagnostic.suggestion {
+                                outputs.push(format!("{}", suggestion));
+                            }
+                        }
+                    }
+                }
+            }
+            println!("{}", outputs.join("\n"));
+            println!(
+                "{} {} checked",
+                green!("✔"),
+                pluralize!(success, "contract")
+            );
+            if warnings > 0 {
+                println!(
+                    "{} {} detected",
+                    yellow!("!"),
+                    pluralize!(warnings, "warning")
+                );
+            }
+            if errors > 0 {
+                println!("{} {} detected", red!("x"), pluralize!(errors, "error"));
+            }
+
             if hints_enabled {
                 display_post_check_hint();
             }
-            if project_manifest.project.telemetry {
-                #[cfg(feature = "telemetry")]
-                telemetry_report_event(DeveloperUsageEvent::CheckExecuted(
-                    DeveloperUsageDigest::new(
-                        &project_manifest.project.name,
-                        &project_manifest.project.authors,
-                    ),
-                ));
-            }
+            // if project_manifest.project.telemetry {
+            //     #[cfg(feature = "telemetry")]
+            //     telemetry_report_event(DeveloperUsageEvent::CheckExecuted(
+            //         DeveloperUsageDigest::new(
+            //             &project_manifest.project.name,
+            //             &project_manifest.project.authors,
+            //         ),
+            //     ));
+            // }
         }
         Command::Test(cmd) => {
             let manifest_path = get_manifest_path_or_exit(cmd.manifest_path);
-            let start_repl = false;
-            let res = load_session(&manifest_path, start_repl, &StacksNetwork::Devnet);
-            let (session, project_manifest) = match res {
-                Ok((session, _, manifest, output)) => {
-                    if let Some(message) = output {
-                        println!("{}", message);
-                    }
-                    (Some(session), manifest)
-                }
-                Err((manifest, e)) => {
-                    println!("{}", e);
-                    (None, manifest)
+
+            let res = match cmd.deployment_plan_path {
+                None => generate_default_deployment(&manifest_path, &None),
+                Some(path) => load_deployment(
+                    &manifest_path,
+                    &get_absolute_deployment_path(&manifest_path, &path),
+                ),
+            };
+
+            let deployment = match res {
+                Ok(deployment) => deployment,
+                Err(e) => {
+                    println!("error: {}", e);
+                    process::exit(1);
                 }
             };
+
+            let (session, results) = setup_session_with_deployment(&manifest_path, &deployment);
+
             let (success, _count) = match run_scripts(
                 cmd.files,
                 cmd.coverage,
@@ -723,7 +880,7 @@ pub fn main() {
                 true,
                 false,
                 manifest_path,
-                session,
+                Some(session),
             ) {
                 Ok(count) => (true, count),
                 Err((_, count)) => (false, count),
@@ -731,37 +888,42 @@ pub fn main() {
             if hints_enabled {
                 display_tests_pro_tips_hint();
             }
-            if project_manifest.project.telemetry {
-                #[cfg(feature = "telemetry")]
-                telemetry_report_event(DeveloperUsageEvent::TestSuiteExecuted(
-                    DeveloperUsageDigest::new(
-                        &project_manifest.project.name,
-                        &project_manifest.project.authors,
-                    ),
-                    success,
-                    _count,
-                ));
-            }
+            // if project_manifest.project.telemetry {
+            //     #[cfg(feature = "telemetry")]
+            //     telemetry_report_event(DeveloperUsageEvent::TestSuiteExecuted(
+            //         DeveloperUsageDigest::new(
+            //             &project_manifest.project.name,
+            //             &project_manifest.project.authors,
+            //         ),
+            //         success,
+            //         _count,
+            //     ));
+            // }
             if !success {
                 process::exit(1)
             }
         }
         Command::Run(cmd) => {
             let manifest_path = get_manifest_path_or_exit(cmd.manifest_path);
-            let start_repl = false;
-            let res = load_session(&manifest_path, start_repl, &StacksNetwork::Devnet);
-            let session = match res {
-                Ok((session, _, _, output)) => {
-                    if let Some(message) = output {
-                        println!("{}", message);
-                    }
-                    session
-                }
-                Err((_, e)) => {
-                    println!("{}", e);
-                    return;
+
+            let res = match cmd.deployment_plan_path {
+                None => generate_default_deployment(&manifest_path, &None),
+                Some(path) => load_deployment(
+                    &manifest_path,
+                    &get_absolute_deployment_path(&manifest_path, &path),
+                ),
+            };
+
+            let deployment = match res {
+                Ok(deployment) => deployment,
+                Err(e) => {
+                    println!("error: {}", e);
+                    process::exit(1);
                 }
             };
+
+            let (session, results) = setup_session_with_deployment(&manifest_path, &deployment);
+
             let _ = run_scripts(
                 vec![cmd.script],
                 false,
