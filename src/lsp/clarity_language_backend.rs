@@ -14,7 +14,7 @@ use std::str::FromStr;
 use std::sync::RwLock;
 
 use super::utils;
-use crate::poke::load_session_settings;
+use crate::deployment::read_or_default_to_generated_deployment;
 use crate::types::StacksNetwork;
 
 #[allow(dead_code)]
@@ -75,114 +75,113 @@ impl ClarityLanguageBackend {
         logs.push("Full analysis will start".into());
 
         // Retrieve ./Clarinet.toml and settings/Devnet.toml paths
-        let settings = match self.get_config_files_paths() {
+        let deployment = match self.get_config_files_paths() {
             Err(message) => return Err((message, logs)),
             Ok(Some(clarinet_toml_path)) => {
-                // Read these 2 files and build a SessionSetting
-                match load_session_settings(&clarinet_toml_path, &StacksNetwork::Devnet, true) {
-                    Err(message) => return Err((message, logs)),
-                    Ok((settings, _, _)) => settings,
+                match read_or_default_to_generated_deployment(&clarinet_toml_path, &None) {
+                    Ok(deployment) => deployment,
+                    Err(message) => return Err((message, vec![])),
                 }
             }
-            Ok(None) => SessionSettings::default(),
+            Ok(None) => return Err(("unable to locate Clarinet.toml".into(), vec![])),
         };
 
         // Build a blank Session: we will be evaluating the contracts one by one
-        let mut incremental_session = Session::new(settings.clone());
+        let mut incremental_session = Session::new(SessionSettings::default());
         let mut collected_diagnostics = HashMap::new();
         let mainnet = false;
 
-        for (i, contract) in settings.initial_contracts.iter().enumerate() {
-            let contract_path =
-                PathBuf::from_str(&contract.path).expect("Expect url to be well formatted");
-            let contract_url =
-                Url::from_file_path(contract_path).expect("Expect url to be well formatted");
-            let contract_id = contract
-                .get_contract_identifier(mainnet)
-                .expect("Expect contract to be named");
-            let code = fs::read_to_string(&contract.path).expect("Expect file to be readable");
+        // for (i, contract) in settings.initial_contracts.iter().enumerate() {
+        //     let contract_path =
+        //         PathBuf::from_str(&contract.path).expect("Expect url to be well formatted");
+        //     let contract_url =
+        //         Url::from_file_path(contract_path).expect("Expect url to be well formatted");
+        //     let contract_id = contract
+        //         .get_contract_identifier(mainnet)
+        //         .expect("Expect contract to be named");
+        //     let code = fs::read_to_string(&contract.path).expect("Expect file to be readable");
 
-            logs.push(format!("Analysis #{}: {}", i, contract_id.to_string()));
+        //     logs.push(format!("Analysis #{}: {}", i, contract_id.to_string()));
 
-            // Before doing anything, keep a clone of the session before inserting anything in the datastore.
-            let session = incremental_session.clone();
+        //     // Before doing anything, keep a clone of the session before inserting anything in the datastore.
+        //     let session = incremental_session.clone();
 
-            // Extract the AST, and try to move to the next contract if we throw an error:
-            // we're trying to get as many errors as possible
-            let (mut ast, mut diagnostics, _) = incremental_session.interpreter.build_ast(
-                contract_id.clone(),
-                code.clone(),
-                settings.repl_settings.parser_version,
-            );
+        //     // Extract the AST, and try to move to the next contract if we throw an error:
+        //     // we're trying to get as many errors as possible
+        //     let (mut ast, mut diagnostics, _) = incremental_session.interpreter.build_ast(
+        //         contract_id.clone(),
+        //         code.clone(),
+        //         settings.repl_settings.parser_version,
+        //     );
 
-            // Run the analysis, and try to move to the next contract if we throw an error:
-            // we're trying to get as many errors as possible
-            let (annotations, mut annotation_diagnostics) = incremental_session
-                .interpreter
-                .collect_annotations(&ast, &code);
-            diagnostics.append(&mut annotation_diagnostics);
-            let (analysis, mut analysis_diagnostics) = match incremental_session
-                .interpreter
-                .run_analysis(contract_id.clone(), &mut ast, &annotations)
-            {
-                Ok(analysis) => analysis,
-                Err((_, Some(diagnostic), _)) => {
-                    diagnostics.push(diagnostic);
-                    collected_diagnostics.insert(
-                        contract_url.clone(),
-                        diagnostics
-                            .into_iter()
-                            .map(|d| utils::convert_clarity_diagnotic_to_lsp_diagnostic(d))
-                            .collect::<Vec<Diagnostic>>(),
-                    );
-                    continue;
-                }
-                Err((_, _, Some(error))) => {
-                    logs.push(format!("Unable to get analysis: {:?}", error).into());
-                    continue;
-                }
-                _ => {
-                    logs.push("Unable to get diagnostics".into());
-                    continue;
-                }
-            };
-            diagnostics.append(&mut analysis_diagnostics);
-            collected_diagnostics.insert(
-                contract_url.clone(),
-                diagnostics
-                    .into_iter()
-                    .map(|d| utils::convert_clarity_diagnotic_to_lsp_diagnostic(d))
-                    .collect::<_>(),
-            );
+        //     // Run the analysis, and try to move to the next contract if we throw an error:
+        //     // we're trying to get as many errors as possible
+        //     let (annotations, mut annotation_diagnostics) = incremental_session
+        //         .interpreter
+        //         .collect_annotations(&ast, &code);
+        //     diagnostics.append(&mut annotation_diagnostics);
+        //     let (analysis, mut analysis_diagnostics) = match incremental_session
+        //         .interpreter
+        //         .run_analysis(contract_id.clone(), &mut ast, &annotations)
+        //     {
+        //         Ok(analysis) => analysis,
+        //         Err((_, Some(diagnostic), _)) => {
+        //             diagnostics.push(diagnostic);
+        //             collected_diagnostics.insert(
+        //                 contract_url.clone(),
+        //                 diagnostics
+        //                     .into_iter()
+        //                     .map(|d| utils::convert_clarity_diagnotic_to_lsp_diagnostic(d))
+        //                     .collect::<Vec<Diagnostic>>(),
+        //             );
+        //             continue;
+        //         }
+        //         Err((_, _, Some(error))) => {
+        //             logs.push(format!("Unable to get analysis: {:?}", error).into());
+        //             continue;
+        //         }
+        //         _ => {
+        //             logs.push("Unable to get diagnostics".into());
+        //             continue;
+        //         }
+        //     };
+        //     diagnostics.append(&mut analysis_diagnostics);
+        //     collected_diagnostics.insert(
+        //         contract_url.clone(),
+        //         diagnostics
+        //             .into_iter()
+        //             .map(|d| utils::convert_clarity_diagnotic_to_lsp_diagnostic(d))
+        //             .collect::<_>(),
+        //     );
 
-            // Executing the contract will also save the contract into the Datastore. This is required
-            // for the next contracts, that could depend on the current contract.
-            let _ = incremental_session.interpreter.execute(
-                contract_id.clone(),
-                &mut ast,
-                code.clone(),
-                analysis.clone(),
-                false,
-                false,
-                None,
-            );
+        //     // Executing the contract will also save the contract into the Datastore. This is required
+        //     // for the next contracts, that could depend on the current contract.
+        //     let _ = incremental_session.interpreter.execute(
+        //         contract_id.clone(),
+        //         &mut ast,
+        //         code.clone(),
+        //         analysis.clone(),
+        //         false,
+        //         false,
+        //         None,
+        //     );
 
-            // We have a legit contract, let's extract some Intellisense data that will be served for
-            // auto-completion requests
-            let intellisense = utils::build_intellisense(&analysis);
+        //     // We have a legit contract, let's extract some Intellisense data that will be served for
+        //     // auto-completion requests
+        //     let intellisense = utils::build_intellisense(&analysis);
 
-            let contract_state = ContractState {
-                analysis,
-                session,
-                intellisense,
-            };
+        //     let contract_state = ContractState {
+        //         analysis,
+        //         session,
+        //         intellisense,
+        //     };
 
-            if let Ok(ref mut contracts_writer) = self.contracts.write() {
-                contracts_writer.insert(contract_url, contract_state);
-            } else {
-                logs.push(format!("Unable to acquire write lock"));
-            }
-        }
+        //     if let Ok(ref mut contracts_writer) = self.contracts.write() {
+        //         contracts_writer.insert(contract_url, contract_state);
+        //     } else {
+        //         logs.push(format!("Unable to acquire write lock"));
+        //     }
+        // }
         return Ok((collected_diagnostics, logs));
     }
 
