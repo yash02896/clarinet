@@ -14,6 +14,7 @@ use crate::integrate::{self, DevnetOrchestrator};
 use crate::lsp::run_lsp;
 use crate::runnner::run_scripts;
 use crate::types::{ProjectManifest, ProjectManifestFile, RequirementConfig, StacksNetwork};
+use clarinet_lib::runnner::Cache;
 use clarity_repl::clarity::analysis::{AnalysisDatabase, ContractAnalysis};
 use clarity_repl::clarity::costs::LimitedCostTracker;
 use clarity_repl::clarity::diagnostic::Level;
@@ -821,12 +822,7 @@ pub fn main() {
                     }
                 }
             }
-            println!("{}", outputs.join("\n"));
-            println!(
-                "{} {} checked",
-                green!("✔"),
-                pluralize!(success, "contract")
-            );
+            println!("{}\n", outputs.join("\n"));
             if warnings > 0 {
                 println!(
                     "{} {} detected",
@@ -836,6 +832,13 @@ pub fn main() {
             }
             if errors > 0 {
                 println!("{} {} detected", red!("x"), pluralize!(errors, "error"));
+            } else {
+                println!(
+                    "{} {} checked, {} successfully validated",
+                    green!("✔"),
+                    pluralize!(contracts_checked, "contract"),
+                    success
+                );
             }
 
             if hints_enabled {
@@ -854,12 +857,16 @@ pub fn main() {
         Command::Test(cmd) => {
             let manifest_path = get_manifest_path_or_exit(cmd.manifest_path);
 
-            let res = match cmd.deployment_plan_path {
-                None => generate_default_deployment(&manifest_path, &None),
-                Some(path) => load_deployment(
-                    &manifest_path,
-                    &get_absolute_deployment_path(&manifest_path, &path),
-                ),
+            let (res, deployment_path) = match cmd.deployment_plan_path {
+                None => {
+                    let deployment = generate_default_deployment(&manifest_path, &None);
+                    (deployment, None)
+                },
+                Some(path) => {
+                    let deployment_path = get_absolute_deployment_path(&manifest_path, &path);
+                    let deployment = load_deployment(&manifest_path, &deployment_path);
+                    (deployment, Some(format!("{}", deployment_path.display())))
+                },
             };
 
             let deployment = match res {
@@ -869,8 +876,22 @@ pub fn main() {
                     process::exit(1);
                 }
             };
+            
+            let mut session_accounts_only = initiate_session_from_deployment(&manifest_path, &deployment);
+            update_session_with_genesis_accounts(&mut default_session_accounts_only, &deployment);
+            let session = default_session_accounts_only.clone();
+            let execution_results = update_session_with_contracts(&mut session, &deployment)
+                .into_iter()
+                .map(|k, v| (k, v.expect("unable to run test in presence of contract errors")))
+                .collect::<HashMap<_, _>>();
 
-            let (session, results) = setup_session_with_deployment(&manifest_path, &deployment);
+            let cache = Cache {
+                session,
+                session_accounts_only,
+                deployment_path,
+                execution_results,
+                deployment
+            };
 
             let (success, _count) = match run_scripts(
                 cmd.files,
@@ -880,7 +901,8 @@ pub fn main() {
                 true,
                 false,
                 manifest_path,
-                Some(session),
+                cache,
+
             ) {
                 Ok(count) => (true, count),
                 Err((_, count)) => (false, count),

@@ -48,7 +48,7 @@ use clarity_repl::clarity::{
     },
 };
 use clarity_repl::clarity::{ClarityName, ContractName};
-use clarity_repl::repl::settings::InitialContract;
+use clarity_repl::repl::settings::{InitialContract, Account};
 use clarity_repl::repl::SessionSettings;
 use clarity_repl::repl::{ExecutionResult, Session};
 use libsecp256k1::{PublicKey, SecretKey};
@@ -210,8 +210,8 @@ pub fn update_session_with_genesis_accounts(
     if let Some(ref genesis) = deployment.genesis {
         for wallet in genesis.wallets.iter() {
             let _ = session.interpreter.mint_stx_balance(
-                wallet.principal.clone().into(),
-                wallet.amount.try_into().unwrap(),
+                wallet.address.clone().into(),
+                wallet.balance.try_into().unwrap(),
             );
         }
     }
@@ -620,6 +620,7 @@ pub fn generate_default_deployment(
 
     let mut transactions = vec![];
     let mut contracts_map = BTreeMap::new();
+    let mut cached_artifacts = BTreeMap::new();
 
     // Only handle requirements in test environments
     if network.is_none() && project_config.project.requirements.is_some() {
@@ -823,8 +824,8 @@ pub fn generate_default_deployment(
     }
 
     let mut wallets = vec![];
-    for (label, account) in chain_config.accounts.into_iter() {
-        let principal = match PrincipalData::parse_standard_principal(&account.address) {
+    for (name, account) in chain_config.accounts.into_iter() {
+        let address = match PrincipalData::parse_standard_principal(&account.address) {
             Ok(res) => res,
             Err(_) => {
                 return Err(format!(
@@ -835,9 +836,9 @@ pub fn generate_default_deployment(
         };
 
         wallets.push(WalletSpecification {
-            label,
-            principal,
-            amount: account.balance.into(),
+            name,
+            address,
+            balance: account.balance.into(),
         });
     }
 
@@ -859,6 +860,7 @@ pub fn generate_default_deployment(
             batches
         },
         contracts: contracts_map,
+        cached_artifacts,
     };
 
     // settings.include_boot_contracts = vec![

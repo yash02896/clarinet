@@ -158,6 +158,11 @@ impl StacksDevnet {
 
         for account in accounts.iter() {
             let account_settings = account.downcast_or_throw::<JsObject, _>(&mut cx)?;
+            let label = account_settings
+                .get(&mut cx, "label")?
+                .downcast_or_throw::<JsString, _>(&mut cx)?
+                .value(&mut cx);
+
             let id = account_settings
                 .get(&mut cx, "id")?
                 .downcast_or_throw::<JsString, _>(&mut cx)?
@@ -199,6 +204,7 @@ impl StacksDevnet {
             let (address, _, _) = compute_addresses(&mnemonic, &derivation, is_mainnet);
 
             let account = AccountConfig {
+                label,
                 mnemonic,
                 address,
                 derivation,
@@ -591,7 +597,6 @@ fn main(mut cx: ModuleContext) -> NeonResult<()> {
 }
 
 fn get_manifest_path_or_exit(path: Option<String>) -> PathBuf {
-    println!("");
     if let Some(path) = path {
         let manifest_path = PathBuf::from(path);
         if !manifest_path.exists() {

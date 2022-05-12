@@ -4,6 +4,8 @@ use clarity_repl::clarity::types::{
 use clarity_repl::clarity::util::hash::hex_bytes;
 use clarity_repl::clarity::util::StacksAddress;
 use clarity_repl::clarity::{ClarityName, ContractName};
+use clarity_repl::repl::ExecutionResult;
+use clarity_repl::repl::settings::Account;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -14,9 +16,9 @@ use std::fs;
 use std::fs::DirEntry;
 use std::str::FromStr;
 
-use crate::types::StacksNetwork;
+use crate::types::{StacksNetwork, AccountConfig};
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct TransactionPlanSpecification {
     pub batches: Vec<TransactionsBatchSpecification>,
 }
@@ -78,7 +80,7 @@ pub struct EmulatedContractPublishSpecificationFile {
     pub path: String,
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct TransactionsBatchSpecification {
     pub id: usize,
     pub transactions: Vec<TransactionSpecification>,
@@ -322,7 +324,7 @@ impl EmulatedContractPublishSpecification {
     }
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeploymentSpecification {
     pub id: u32,
     pub name: String,
@@ -331,7 +333,7 @@ pub struct DeploymentSpecification {
     #[serde(rename = "start-block")]
     pub start_block: u64,
     pub plan: TransactionPlanSpecification,
-    #[serde(skip_serializing)]
+    #[serde(skip_serializing, skip_deserializing)]
     pub contracts: BTreeMap<QualifiedContractIdentifier, (String, String)>,
 }
 
@@ -423,7 +425,8 @@ impl DeploymentSpecification {
                     }
                 }
                 if let Some(ref genesis_specs) = specs.genesis {
-                    genesis = Some(GenesisSpecification::from_specifications(genesis_specs)?);
+                    let genesis_specs = GenesisSpecification::from_specifications(genesis_specs)?;
+                    genesis = Some(genesis_specs);
                 }
                 (TransactionPlanSpecification { batches }, genesis)
             }
@@ -466,6 +469,7 @@ impl DeploymentSpecification {
             start_block: specs.start_block.unwrap_or(0),
             plan,
             contracts,
+            cached_artifacts: BTreeMap::new(),
         })
     }
 
@@ -508,12 +512,12 @@ pub struct GenesisSpecificationFile {
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub struct WalletSpecificationFile {
-    pub label: String,
-    pub principal: String,
-    pub amount: String,
+    pub name: String,
+    pub address: String,
+    pub balance: String,
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct GenesisSpecification {
     pub wallets: Vec<WalletSpecification>,
     pub contracts: Vec<String>,
@@ -538,9 +542,9 @@ impl GenesisSpecification {
         let mut wallets = vec![];
         for wallet in self.wallets.iter() {
             wallets.push(WalletSpecificationFile {
-                label: wallet.label.to_string(),
-                principal: wallet.principal.to_string(),
-                amount: format!("{}", wallet.amount),
+                name: wallet.name.to_string(),
+                address: wallet.address.to_string(),
+                balance: format!("{}", wallet.balance),
             })
         }
 
@@ -551,41 +555,41 @@ impl GenesisSpecification {
     }
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct WalletSpecification {
-    pub label: String,
-    pub principal: StandardPrincipalData,
-    pub amount: u128,
+    pub name: String,
+    pub address: StandardPrincipalData,
+    pub balance: u128,
 }
 
 impl WalletSpecification {
     pub fn from_specifications(
         specs: &WalletSpecificationFile,
     ) -> Result<WalletSpecification, String> {
-        let principal = match PrincipalData::parse_standard_principal(&specs.principal) {
+        let address = match PrincipalData::parse_standard_principal(&specs.address) {
             Ok(res) => res,
             Err(_) => {
                 return Err(format!(
                     "unable to turn {}'s principal as a valid Stacks address",
-                    specs.label
+                    specs.name
                 ))
             }
         };
 
-        let amount = match u128::from_str_radix(&specs.amount, 10) {
+        let balance = match u128::from_str_radix(&specs.balance, 10) {
             Ok(res) => res,
             Err(_) => {
                 return Err(format!(
                     "unable to parse {}'s balance as a u128",
-                    specs.label
+                    specs.name
                 ))
             }
         };
 
         Ok(WalletSpecification {
-            label: specs.label.to_string(),
-            principal,
-            amount,
+            name: specs.name.to_string(),
+            address,
+            balance,
         })
     }
 }

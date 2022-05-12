@@ -74,8 +74,6 @@ export interface Account {
   address: string;
   balance: number;
   name: string;
-  mnemonic: string;
-  derivation: string;
 }
 
 export interface Chain {
@@ -111,7 +109,7 @@ export class Chain {
   }
 
   mineBlock(transactions: Array<Tx>): Block {
-    let result = JSON.parse((Deno as any).core.opSync("mine_block", {
+    let result = JSON.parse((Deno as any).core.opSync("api/v2/mine_block", {
       sessionId: this.sessionId,
       transactions: transactions,
     }));
@@ -124,7 +122,7 @@ export class Chain {
   }
 
   mineEmptyBlock(count: number): EmptyBlock {
-    let result = JSON.parse((Deno as any).core.opSync("mine_empty_blocks", {
+    let result = JSON.parse((Deno as any).core.opSync("api/v2/mine_empty_blocks", {
       sessionId: this.sessionId,
       count: count,
     }));
@@ -150,7 +148,7 @@ export class Chain {
     args: Array<any>,
     sender: string,
   ): ReadOnlyFn {
-    let result = JSON.parse((Deno as any).core.opSync("call_read_only_fn", {
+    let result = JSON.parse((Deno as any).core.opSync("api/v2/call_read_only_fn", {
       sessionId: this.sessionId,
       contract: contract,
       method: method,
@@ -166,7 +164,7 @@ export class Chain {
   }
 
   getAssetsMaps(): AssetsMaps {
-    let result = JSON.parse((Deno as any).core.opSync("get_assets_maps", {
+    let result = JSON.parse((Deno as any).core.opSync("api/v2/get_assets_maps", {
       sessionId: this.sessionId,
     }));
     let assetsMaps: AssetsMaps = {
@@ -177,7 +175,7 @@ export class Chain {
   }
 }
 
-type BeforeHookFunction = (
+type PreDeploymentFunction = (
   chain: Chain,
   accounts: Map<string, Account>,
 ) => void | Promise<void>;
@@ -193,7 +191,8 @@ interface UnitTestOptions {
   name: string;
   only?: true;
   ignore? :true;
-  beforeContractsDeployment?: BeforeHookFunction;
+  deploymentPath?: string;
+  preDeployment?: PreDeploymentFunction;
   fn: TestFunction;
 }
 
@@ -226,22 +225,23 @@ export class Clarinet {
       async fn() {
         (Deno as any).core.ops();
 
-        let includesPreDeploymentSteps = options.beforeContractsDeployment !== undefined;
+        let hasPreDeploymentSteps = options.preDeployment !== undefined;
 
-        let result = JSON.parse((Deno as any).core.opSync("start_setup_chain", {
+        let result = JSON.parse((Deno as any).core.opSync("api/v2/new_session", {
           name: options.name,
-          includesPreDeploymentSteps: includesPreDeploymentSteps,
+          loadDeployment: !hasPreDeploymentSteps,
+          deploymentPath: options.deploymentPath
         }));
 
-        if (options.beforeContractsDeployment !== undefined) {
+        if (hasPreDeploymentSteps) {
           let chain = new Chain(result["session_id"]);
           let accounts: Map<string, Account> = new Map();
           for (let account of result["accounts"]) {
             accounts.set(account.name, account);
           }
-          await options.beforeContractsDeployment(chain, accounts);
+          await options.preDeployment(chain, accounts);
 
-          result = JSON.parse((Deno as any).core.opSync("complete_setup_chain", {
+          result = JSON.parse((Deno as any).core.opSync("api/v2/load_deployment", {
             sessionId: chain.sessionId,
           }));
         }
@@ -256,6 +256,11 @@ export class Clarinet {
           contracts.set(contract.contract_id, contract);
         }
         await options.fn(chain, accounts, contracts);
+
+        JSON.parse((Deno as any).core.opSync("api/v2/terminate_session", {
+          sessionId: chain.sessionId,
+        }));
+
       },
     });
   }
@@ -265,9 +270,10 @@ export class Clarinet {
       name: "running script",
       async fn() {
         (Deno as any).core.ops();
-        let result = JSON.parse((Deno as any).core.opSync("setup_chain", {
+        let result = JSON.parse((Deno as any).core.opSync("api/v2/new_session", {
           name: "running script",
-          transactions: [],
+          loadDeployment: true,
+          deploymentPath: undefined
         }));
         let accounts: Map<string, Account> = new Map();
         for (let account of result["accounts"]) {
