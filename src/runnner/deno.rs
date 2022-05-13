@@ -617,7 +617,7 @@ pub async fn run_script(
             deno_core::op_sync(api_v2::get_assets_maps),
         );
 
-        // Additionally, we're atching this legacy ops to display a human readable error
+        // Additionally, we're catching this legacy ops to display a human readable error
         js_runtime.register_op("setup_chain", deno_core::op_sync(deprecation_notice));
         js_runtime.register_op("start_setup_chain", deno_core::op_sync(deprecation_notice));
 
@@ -673,7 +673,7 @@ pub async fn run_script(
 }
 
 pub fn deprecation_notice(state: &mut OpState, args: Value, _: ()) -> Result<(), AnyError> {
-    println!("{}: this version of clarinet is incompatible with the version of the library being imported in the test files.", red!("error"));
+    println!("{}: clarinet v{} is incompatible with the version of the library being imported in the test files.", red!("error"), option_env!("CARGO_PKG_VERSION").expect("Unable to detect version"));
     println!("The test files should import the latest version.");
     std::process::exit(1);
 }

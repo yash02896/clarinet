@@ -233,7 +233,7 @@ export class Clarinet {
           deploymentPath: options.deploymentPath
         }));
 
-        if (hasPreDeploymentSteps) {
+        if (options.preDeployment) {
           let chain = new Chain(result["session_id"]);
           let accounts: Map<string, Account> = new Map();
           for (let account of result["accounts"]) {

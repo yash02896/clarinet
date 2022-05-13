@@ -505,6 +505,17 @@ pub fn check_deployments(manifest_path: &PathBuf) -> Result<(), String> {
     Ok(())
 }
 
+pub fn load_deployment_if_exists(
+    manifest_path: &PathBuf,
+    network: &Option<StacksNetwork>,
+) -> Option<Result<DeploymentSpecification, String>> {
+    let default_deployment_path = get_default_deployment_path(manifest_path, network);
+    if !default_deployment_path.exists() {
+        return None;
+    }
+    Some(load_deployment(manifest_path, &default_deployment_path))
+}
+
 pub fn load_deployment(
     manifest_path: &PathBuf,
     deployment_path: &PathBuf,
@@ -782,7 +793,7 @@ pub fn generate_default_deployment(
     }
 
     let settings = SessionSettings::default();
-    let mut session = Session::new(settings);
+    let session = Session::new(settings);
 
     let mut contract_asts = HashMap::new();
 
@@ -794,15 +805,20 @@ pub fn generate_default_deployment(
         contract_asts.insert(contract_id.clone(), ast);
     }
 
-    let dependencies = ASTDependencyDetector::detect_dependencies(&contract_asts, &BTreeMap::new());
+    let dependencies = ASTDependencyDetector::detect_dependencies(
+        &contract_asts,
+        &session.get_boot_contracts_asts(),
+    );
     let mut ordered_contracts_ids = vec![];
-    if let Ok(ref dependencies) = dependencies {
-        match ASTDependencyDetector::order_contracts(dependencies) {
+    match dependencies {
+        Ok(ref dependencies) => match ASTDependencyDetector::order_contracts(dependencies) {
             Ok(ref mut contracts) => ordered_contracts_ids.append(contracts),
             Err(e) => return Err(format!("unable order contracts {}", e)),
-        };
-    } else {
-        // TODO(lgalabru): do something
+        },
+        Err((_resolved, missing)) => {
+            // TODO(lgalabru): do something
+            println!("==> {:?}", missing);
+        }
     }
 
     for contract_id in ordered_contracts_ids.into_iter() {

@@ -22,7 +22,7 @@ Clarinet.test({
         block.receipts[2].result
             .expectOk()
             .expectUint(16);
-        
+
         block = chain.mineBlock([
             Tx.contractCall("counter", "increment", [types.uint(1)], wallet_1.address),
             Tx.contractCall("counter", "increment", [types.uint(4)], wallet_1.address),
@@ -56,7 +56,7 @@ Clarinet.test({
 
 Clarinet.test({
     name: "Test with pre-setup",
-    beforeContractsDeployment: async (chain: Chain, accounts: Map<string, Account>) => {
+    preDeployment: async (chain: Chain, accounts: Map<string, Account>) => {
         chain.mineEmptyBlock(100);
     },
     async fn(chain: Chain, accounts: Map<string, Account>, contracts: Map<string, Contract>) {

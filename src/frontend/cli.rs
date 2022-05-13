@@ -1,8 +1,8 @@
 use crate::deployment::{
     apply_on_chain_deployment, check_deployments, create_default_test_deployment,
     display_deployment, generate_default_deployment, get_absolute_deployment_path,
-    get_default_deployment_path, load_deployment, read_or_default_to_generated_deployment,
-    setup_session_with_deployment, write_deployment,
+    get_default_deployment_path, load_deployment, load_deployment_if_exists,
+    read_or_default_to_generated_deployment, setup_session_with_deployment, write_deployment,
 };
 use crate::generate::{
     self,
@@ -857,8 +857,22 @@ pub fn main() {
 
             let (res, deployment_path) = match cmd.deployment_plan_path {
                 None => {
-                    let deployment = generate_default_deployment(&manifest_path, &None);
-                    (deployment, None)
+                    let res = load_deployment_if_exists(&manifest_path, &None);
+                    match res {
+                        Some(Ok(deployment)) => {
+                            println!("{}: using deployments/Test.yaml", yellow!("note"));
+                            (Ok(deployment), None)
+                        }
+                        Some(Err(e)) => {
+                            println!(
+                                "{}: loading deployments/Test.yaml failed with error: {}",
+                                red!("error"),
+                                e
+                            );
+                            std::process::exit(1);
+                        }
+                        None => (generate_default_deployment(&manifest_path, &None), None),
+                    }
                 }
                 Some(path) => {
                     let deployment_path = get_absolute_deployment_path(&manifest_path, &path);
