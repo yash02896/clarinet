@@ -4,8 +4,8 @@ use clarity_repl::clarity::types::{
 use clarity_repl::clarity::util::hash::hex_bytes;
 use clarity_repl::clarity::util::StacksAddress;
 use clarity_repl::clarity::{ClarityName, ContractName};
-use clarity_repl::repl::ExecutionResult;
 use clarity_repl::repl::settings::Account;
+use clarity_repl::repl::ExecutionResult;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -16,7 +16,7 @@ use std::fs;
 use std::fs::DirEntry;
 use std::str::FromStr;
 
-use crate::types::{StacksNetwork, AccountConfig};
+use crate::types::{AccountConfig, StacksNetwork};
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct TransactionPlanSpecification {
@@ -469,7 +469,6 @@ impl DeploymentSpecification {
             start_block: specs.start_block.unwrap_or(0),
             plan,
             contracts,
-            cached_artifacts: BTreeMap::new(),
         })
     }
 

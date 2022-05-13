@@ -1,10 +1,8 @@
 use crate::deployment::{
-    apply_on_chain_deployment, check_deployments, get_absolute_deployment_path,
-    get_default_deployment_path, read_or_default_to_generated_deployment,
-};
-use crate::deployment::{
-    create_default_test_deployment, display_deployment, generate_default_deployment,
-    load_deployment, setup_session_with_deployment, write_deployment,
+    apply_on_chain_deployment, check_deployments, create_default_test_deployment,
+    display_deployment, generate_default_deployment, get_absolute_deployment_path,
+    get_default_deployment_path, load_deployment, read_or_default_to_generated_deployment,
+    setup_session_with_deployment, write_deployment,
 };
 use crate::generate::{
     self,
@@ -13,8 +11,8 @@ use crate::generate::{
 use crate::integrate::{self, DevnetOrchestrator};
 use crate::lsp::run_lsp;
 use crate::runnner::run_scripts;
+use crate::runnner::DeploymentCache;
 use crate::types::{ProjectManifest, ProjectManifestFile, RequirementConfig, StacksNetwork};
-use clarinet_lib::runnner::Cache;
 use clarity_repl::clarity::analysis::{AnalysisDatabase, ContractAnalysis};
 use clarity_repl::clarity::costs::LimitedCostTracker;
 use clarity_repl::clarity::diagnostic::Level;
@@ -861,12 +859,12 @@ pub fn main() {
                 None => {
                     let deployment = generate_default_deployment(&manifest_path, &None);
                     (deployment, None)
-                },
+                }
                 Some(path) => {
                     let deployment_path = get_absolute_deployment_path(&manifest_path, &path);
                     let deployment = load_deployment(&manifest_path, &deployment_path);
                     (deployment, Some(format!("{}", deployment_path.display())))
-                },
+                }
             };
 
             let deployment = match res {
@@ -876,22 +874,8 @@ pub fn main() {
                     process::exit(1);
                 }
             };
-            
-            let mut session_accounts_only = initiate_session_from_deployment(&manifest_path, &deployment);
-            update_session_with_genesis_accounts(&mut default_session_accounts_only, &deployment);
-            let session = default_session_accounts_only.clone();
-            let execution_results = update_session_with_contracts(&mut session, &deployment)
-                .into_iter()
-                .map(|k, v| (k, v.expect("unable to run test in presence of contract errors")))
-                .collect::<HashMap<_, _>>();
 
-            let cache = Cache {
-                session,
-                session_accounts_only,
-                deployment_path,
-                execution_results,
-                deployment
-            };
+            let cache = DeploymentCache::new(&manifest_path, deployment, &deployment_path);
 
             let (success, _count) = match run_scripts(
                 cmd.files,
@@ -902,7 +886,6 @@ pub fn main() {
                 false,
                 manifest_path,
                 cache,
-
             ) {
                 Ok(count) => (true, count),
                 Err((_, count)) => (false, count),
@@ -928,12 +911,16 @@ pub fn main() {
         Command::Run(cmd) => {
             let manifest_path = get_manifest_path_or_exit(cmd.manifest_path);
 
-            let res = match cmd.deployment_plan_path {
-                None => generate_default_deployment(&manifest_path, &None),
-                Some(path) => load_deployment(
-                    &manifest_path,
-                    &get_absolute_deployment_path(&manifest_path, &path),
-                ),
+            let (res, deployment_path) = match cmd.deployment_plan_path {
+                None => {
+                    let deployment = generate_default_deployment(&manifest_path, &None);
+                    (deployment, None)
+                }
+                Some(path) => {
+                    let deployment_path = get_absolute_deployment_path(&manifest_path, &path);
+                    let deployment = load_deployment(&manifest_path, &deployment_path);
+                    (deployment, Some(format!("{}", deployment_path.display())))
+                }
             };
 
             let deployment = match res {
@@ -944,7 +931,7 @@ pub fn main() {
                 }
             };
 
-            let (session, results) = setup_session_with_deployment(&manifest_path, &deployment);
+            let cache = DeploymentCache::new(&manifest_path, deployment, &deployment_path);
 
             let _ = run_scripts(
                 vec![cmd.script],
@@ -954,7 +941,7 @@ pub fn main() {
                 cmd.allow_wallets,
                 cmd.allow_disk_write,
                 manifest_path,
-                Some(session),
+                cache,
             );
         }
         Command::Integrate(cmd) => {

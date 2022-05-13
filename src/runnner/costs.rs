@@ -1,8 +1,10 @@
-use clarity_repl::repl::{CostSynthesis, Session};
 use clarity_repl::prettytable::{color, format, Attr, Cell, Row, Table};
-use std::collections::{btree_map::Entry, BTreeMap};
 use clarity_repl::repl::session::CostsReport;
-use super::globals;
+use clarity_repl::repl::{CostSynthesis, Session};
+use std::collections::HashMap;
+use std::collections::{btree_map::Entry, BTreeMap};
+
+use crate::deployment::types::DeploymentSpecification;
 
 #[derive(Clone)]
 enum Bottleneck {
@@ -85,9 +87,8 @@ impl FunctionCosts {
     }
 }
 
-pub fn display_costs_report() {
+pub fn display_costs_report(sessions: HashMap<u16, (String, Session, DeploymentSpecification)>) {
     let mut consolidated: BTreeMap<String, BTreeMap<String, Vec<CostsReport>>> = BTreeMap::new();
-    let sessions = globals::SESSIONS.lock().unwrap();
 
     let mut contracts_costs: BTreeMap<&String, BTreeMap<&String, Vec<FunctionCosts>>> =
         BTreeMap::new();

@@ -105,24 +105,26 @@ impl StacksEventObserverConfig {
         }
     }
 
-    pub async fn execute_scripts(&self) {
-        if self.devnet_config.execute_script.len() > 0 {
-            for _cmd in self.devnet_config.execute_script.iter() {
-                #[cfg(feature = "cli")]
-                let _ = deno::do_run_scripts(
-                    vec![_cmd.script.clone()],
-                    false,
-                    false,
-                    false,
-                    _cmd.allow_wallets,
-                    _cmd.allow_write,
-                    self.manifest_path.clone(),
-                    Some(self.session.clone()),
-                )
-                .await;
-            }
-        }
-    }
+    // pub async fn execute_scripts(&self) {
+    //     if self.devnet_config.execute_script.len() > 0 {
+    //         // TODO(lgalabru): Build cache
+
+    //         for _cmd in self.devnet_config.execute_script.iter() {
+    //             #[cfg(feature = "cli")]
+    //             let _ = deno::do_run_scripts(
+    //                 vec![_cmd.script.clone()],
+    //                 false,
+    //                 false,
+    //                 false,
+    //                 _cmd.allow_wallets,
+    //                 _cmd.allow_write,
+    //                 self.manifest_path.clone(),
+    //                 None,
+    //             )
+    //             .await;
+    //         }
+    //     }
+    // }
 }
 
 pub async fn start_chains_coordinator(
@@ -131,7 +133,8 @@ pub async fn start_chains_coordinator(
     chains_coordinator_commands_rx: Receiver<ChainsCoordinatorCommand>,
     chains_coordinator_commands_tx: Sender<ChainsCoordinatorCommand>,
 ) -> Result<(), Box<dyn Error>> {
-    let _ = config.execute_scripts().await;
+    // TODO(lgalabru): re-enable
+    // let _ = config.execute_scripts().await;
 
     let indexer = Indexer::new(IndexerConfig {
         stacks_node_rpc_url: format!(

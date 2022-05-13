@@ -19,7 +19,7 @@ use crate::types::{
 };
 use crate::utils::mnemonic;
 use crate::utils::stacks::StacksRpc;
-use clarity_repl::analysis::ast_dependency_detector::ASTDependencyDetector;
+use clarity_repl::analysis::ast_dependency_detector::{ASTDependencyDetector, DependencySet};
 use clarity_repl::clarity::ast::ContractAST;
 use clarity_repl::clarity::codec::transaction::{
     StacksTransaction, StacksTransactionSigner, TransactionAnchorMode, TransactionAuth,
@@ -48,7 +48,7 @@ use clarity_repl::clarity::{
     },
 };
 use clarity_repl::clarity::{ClarityName, ContractName};
-use clarity_repl::repl::settings::{InitialContract, Account};
+use clarity_repl::repl::settings::{Account, InitialContract};
 use clarity_repl::repl::SessionSettings;
 use clarity_repl::repl::{ExecutionResult, Session};
 use libsecp256k1::{PublicKey, SecretKey};
@@ -185,21 +185,21 @@ pub fn setup_session_with_deployment(
     Session,
     BTreeMap<QualifiedContractIdentifier, Result<ExecutionResult, Vec<Diagnostic>>>,
 ) {
-    let mut session = initiate_session_from_deployment(&manifest_path, deployment);
+    let mut session = initiate_session_from_deployment(&manifest_path);
     update_session_with_genesis_accounts(&mut session, deployment);
     let results = update_session_with_contracts(&mut session, deployment);
     (session, results)
 }
 
-pub fn initiate_session_from_deployment(
-    manifest_path: &PathBuf,
-    deployment: &DeploymentSpecification,
-) -> Session {
-    let manifest = ProjectManifest::from_path(manifest_path);
+pub fn initiate_session_from_deployment(manifest_path: &PathBuf) -> Session {
+    let mut manifest = ProjectManifest::from_path(manifest_path);
     let mut settings = SessionSettings::default();
+    settings
+        .include_boot_contracts
+        .append(&mut manifest.project.boot_contracts);
     settings.repl_settings = manifest.repl_settings.clone();
     settings.disk_cache_enabled = true;
-    let mut session = Session::new(settings);
+    let session = Session::new(settings);
     session
 }
 
@@ -207,13 +207,17 @@ pub fn update_session_with_genesis_accounts(
     session: &mut Session,
     deployment: &DeploymentSpecification,
 ) {
-    if let Some(ref genesis) = deployment.genesis {
-        for wallet in genesis.wallets.iter() {
+    if let Some(ref spec) = deployment.genesis {
+        for wallet in spec.wallets.iter() {
             let _ = session.interpreter.mint_stx_balance(
                 wallet.address.clone().into(),
                 wallet.balance.try_into().unwrap(),
             );
+            if wallet.name == "deployer" {
+                session.set_tx_sender(wallet.address.to_address());
+            }
         }
+        session.load_boot_contracts();
     }
 }
 
@@ -233,7 +237,7 @@ pub fn update_session_with_contracts(
                     let result = session.interpret(
                         tx.source.clone(),
                         Some(tx.contract.to_string()),
-                        false,
+                        None,
                         false,
                         None,
                     );
@@ -620,7 +624,6 @@ pub fn generate_default_deployment(
 
     let mut transactions = vec![];
     let mut contracts_map = BTreeMap::new();
-    let mut cached_artifacts = BTreeMap::new();
 
     // Only handle requirements in test environments
     if network.is_none() && project_config.project.requirements.is_some() {
@@ -648,7 +651,7 @@ pub fn generate_default_deployment(
 
         let mut handled: HashMap<
             QualifiedContractIdentifier,
-            (ContractAST, String, HashSet<QualifiedContractIdentifier>),
+            (ContractAST, String, DependencySet),
         > = HashMap::new();
 
         let settings = SessionSettings::default();
@@ -682,19 +685,22 @@ pub fn generate_default_deployment(
             contract_asts.insert(contract_id.clone(), ast.clone());
             let dependencies =
                 ASTDependencyDetector::detect_dependencies(&contract_asts, &BTreeMap::new());
-
-            for (contract_id, dependencies) in dependencies.into_iter() {
-                for dependency in dependencies.iter() {
-                    queue.push_back(dependency.clone());
+            if let Ok(dependencies) = dependencies {
+                for (contract_id, dependencies) in dependencies.into_iter() {
+                    for dependency in dependencies.iter() {
+                        queue.push_back(dependency.contract_id.clone());
+                    }
+                    handled.insert(contract_id, (ast, source, dependencies));
+                    break;
                 }
-                handled.insert(contract_id, (ast, source, dependencies));
-                break;
+            } else {
+                // TODO(lgalabru): do something
             }
         }
 
         let mut unordered_dependencies = HashMap::new();
-        for (contract_id, (_, _, dependencies)) in handled.iter() {
-            unordered_dependencies.insert(contract_id.clone(), dependencies.clone());
+        for (contract_id, (_, _, dependencies)) in handled.into_iter() {
+            unordered_dependencies.insert(contract_id, dependencies);
         }
 
         let ordered_contracts_ids =
@@ -747,7 +753,10 @@ pub fn generate_default_deployment(
             }
         };
 
-        let source = match std::fs::read_to_string(&config.path) {
+        let mut path = manifest_path.clone();
+        path.pop();
+        path.push(&config.path);
+        let source = match std::fs::read_to_string(&path) {
             Ok(code) => code,
             Err(err) => {
                 return Err(format!(
@@ -786,10 +795,15 @@ pub fn generate_default_deployment(
     }
 
     let dependencies = ASTDependencyDetector::detect_dependencies(&contract_asts, &BTreeMap::new());
-    let ordered_contracts_ids = match ASTDependencyDetector::order_contracts(&dependencies) {
-        Ok(ordered_contracts) => ordered_contracts,
-        Err(e) => return Err(format!("unable order contracts {}", e)),
-    };
+    let mut ordered_contracts_ids = vec![];
+    if let Ok(ref dependencies) = dependencies {
+        match ASTDependencyDetector::order_contracts(dependencies) {
+            Ok(ref mut contracts) => ordered_contracts_ids.append(contracts),
+            Err(e) => return Err(format!("unable order contracts {}", e)),
+        };
+    } else {
+        // TODO(lgalabru): do something
+    }
 
     for contract_id in ordered_contracts_ids.into_iter() {
         let data = contracts
@@ -860,7 +874,6 @@ pub fn generate_default_deployment(
             batches
         },
         contracts: contracts_map,
-        cached_artifacts,
     };
 
     // settings.include_boot_contracts = vec![

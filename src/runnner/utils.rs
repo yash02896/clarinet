@@ -1,6 +1,6 @@
+use clarity_repl::clarity::types;
 use clarity_repl::clarity::util::hash;
 use std::fmt::Write;
-use clarity_repl::clarity::types;
 
 pub fn value_to_string(value: &types::Value) -> String {
     use clarity_repl::clarity::types::{CharType, SequenceData, Value};
@@ -57,15 +57,14 @@ pub fn value_to_string(value: &types::Value) -> String {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
+    use super::types;
+    use super::value_to_string;
     use clarity_repl::clarity::representations::ClarityName;
     use clarity_repl::clarity::types::{
         ListTypeData, OptionalData, ResponseData, SequenceData, SequencedValue, TupleData,
     };
-    use super::types;
-    use super::value_to_string;
 
     #[test]
     fn test_value_to_string() {

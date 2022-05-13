@@ -1,19 +1,19 @@
-use deno_core::{OpFn, OpState};
+use crate::deployment::types::DeploymentSpecification;
 use deno_core::error::AnyError;
+use deno_core::serde_json::{self, json, Value};
+use deno_core::{OpFn, OpState};
 use std::borrow::BorrowMut;
 use std::path::PathBuf;
-use deno_core::serde_json::{self, json, Value};
-use crate::deployment::types::DeploymentSpecification;
 
 use super::utils;
-use std::collections::{BTreeMap, HashMap};
+use super::DeploymentCache;
+use clarity_repl::clarity::coverage::TestCoverageReport;
 use clarity_repl::clarity::types;
-use clarity_repl::clarity::coverage::{TestCoverageReport};
 use clarity_repl::repl::Session;
-use super::Cache;
+use std::collections::{BTreeMap, HashMap};
 
 pub enum TestEvent {
-    SessionTerminated(SessionArtifacts)
+    SessionTerminated(SessionArtifacts),
 }
 
 pub struct SessionArtifacts {
@@ -32,27 +32,35 @@ pub fn new_session(state: &mut OpState, args: Value, _: ()) -> Result<String, An
     let args: NewSessionArgs =
         serde_json::from_value(args).expect("Invalid request from JavaScript for \"op_load\".");
 
-    let (session, deployment) = {
-        let cache = state.borrow::<HashMap<Option<String>, Cache>>();
-        
-        let deployment = match args.deployment_path {
+    let session_id = {
+        let session_id = match state.try_borrow_mut::<u32>() {
+            Some(session_id) => session_id,
+            None => panic!(),
+        };
+        *session_id += 1;
+        session_id.clone()
+    };
+
+    let cache = {
+        let caches = state.borrow::<HashMap<Option<String>, DeploymentCache>>();
+        let cache = match args.deployment_path {
             Some(deploynent_path) => {
-                let mut entry = cache.get(&Some(deploynent_path));
+                let mut entry = caches.get(&Some(deploynent_path.clone()));
                 if entry.is_none() {
-                    let mut default_entry = cache.get(&None);
+                    let mut default_entry = caches.get(&None);
                     if let Some(default_entry) = default_entry.take() {
-                        if default_entry.deployment_path == Some(deploynent_path) {
+                        if default_entry.deployment_path == Some(deploynent_path.clone()) {
                             entry = Some(default_entry);
                         }
                     }
                     if entry.is_none() {
                         // Build the cache entry and insert it
-                    }    
+                    }
                 }
                 entry
-            },
+            }
             None => {
-                let mut default_entry = cache.get(&None);
+                let mut default_entry = caches.get(&None);
                 if let Some(default_entry) = default_entry.take() {
                     Some(default_entry)
                 } else {
@@ -61,69 +69,48 @@ pub fn new_session(state: &mut OpState, args: Value, _: ()) -> Result<String, An
                 }
             }
         };
+        cache.unwrap()
     };
 
-    // Update + get a session id
-    let session_id = {
-        let session_id = match state.try_borrow_mut::<u16>() {
-            Some(session_id) => session_id,
-            None => panic!(),
-        };
-        *session_id += 1;
-        session_id.clone()
+    let allow_wallets = state.borrow::<bool>();
+
+    let accounts = if *allow_wallets {
+        cache.deployment.genesis.as_ref().unwrap().wallets.clone()
+    } else {
+        vec![]
     };
 
-    let accounts = deployment.genesis.unwrap().wallets.clone();
-    let contracts = vec![];
-    
-    for (contract_id, artifacts) in deployment.contracts.iter() {
+    let mut serialized_contracts = vec![];
+    let session = if args.load_deployment {
+        for (contract_id, artifacts) in cache.contracts_artifacts.iter() {
+            serialized_contracts.push(json!({
+                "contract_id": contract_id.to_string(),
+                "contract_interface": artifacts.interface,
+                "dependencies": artifacts.dependencies,
+                "source": artifacts.source,
+            }));
+        }
+        cache.session.clone()
+    } else {
+        cache.session_accounts_only.clone()
+    };
 
-    }
-    
     {
-        let sessions = match state.try_borrow_mut::<HashMap<usize, (Session, DeploymentSpecification)>>() {
+        let sessions = match state.try_borrow_mut::<HashMap<u32, (String, Session)>>() {
             Some(sessions) => sessions,
             None => panic!(),
         };
-        let session_id = sessions.insert(session_id.into(), (session, deployment));
+        let session_id = sessions.insert(session_id, (args.name, session));
     }
-
-
-
-
-        // let manifest_path = state.borrow::<PathBuf>();
-
-
-        // let manifest_path = state.borrow::<PathBuf>();    
-
-        // let deployments: HashMap<PathBuf, DeploymentSpecification> = HashMap::new();
-        // js_runtime.op_state().borrow_mut().put(deployments);
-
-        // let sessions: HashMap<usize, Session> = HashMap::new();
-        // js_runtime.op_state().borrow_mut().put(sessions);
-
-        // js_runtime
-        //     .op_state()
-        //     .borrow_mut()
-        //     .put::<Sender<api_v2::TestEvent>>(event_tx.clone());
-
-
-    let (session_id, accounts, contracts) =
-        handle_setup_chain_v2(manifest_path, args.name, args.load_deployment)?;
-
-        let serialized_contracts = contracts.iter().map(|(a, s, _)| json!({
-      "contract_id": a.contract_identifier.to_string(),
-      "contract_interface": a.contract_interface.clone(),
-      "dependencies": a.dependencies.clone().into_iter().map(|c| c.to_string()).collect::<Vec<String>>(),
-      "source": s
-    })).collect::<Vec<_>>();
-
-    let allow_wallets = state.borrow::<bool>();
-    let accounts = if *allow_wallets { accounts } else { &vec![] };
 
     Ok(json!({
         "session_id": session_id,
-        "accounts": accounts,
+        "accounts": accounts.iter().map(|a| json!({
+            "address": a.address.to_string(),
+            "balance": u64::try_from(a.balance)
+                .expect("u128 unsupported at the moment, please open an issue."),
+            "name": a.name.to_string(),
+          })).collect::<Vec<_>>(),
         "contracts": serialized_contracts,
     })
     .to_string())
@@ -138,21 +125,21 @@ struct LoadDeploymentArgs {
 pub fn load_deployment(state: &mut OpState, args: Value, _: ()) -> Result<String, AnyError> {
     let args: LoadDeploymentArgs =
         serde_json::from_value(args).expect("Invalid request from JavaScript for \"op_load\".");
-    let (session_id, accounts, contracts) = complete_setup_chain(args.session_id)?;
-    let serialized_contracts = contracts.iter().map(|(a, s, _)| json!({
-      "contract_id": a.contract_identifier.to_string(),
-      "contract_interface": a.contract_interface.clone(),
-      "dependencies": a.dependencies.clone().into_iter().map(|c| c.to_string()).collect::<Vec<String>>(),
-      "source": s
-    })).collect::<Vec<_>>();
+    // let (session_id, accounts, contracts) = complete_setup_chain(args.session_id)?;
+    // let serialized_contracts = contracts.iter().map(|(a, s, _)| json!({
+    //   "contract_id": a.contract_identifier.to_string(),
+    //   "contract_interface": a.contract_interface.clone(),
+    //   "dependencies": a.dependencies.clone().into_iter().map(|c| c.to_string()).collect::<Vec<String>>(),
+    //   "source": s
+    // })).collect::<Vec<_>>();
 
-    let allow_wallets = state.borrow::<bool>();
-    let accounts = if *allow_wallets { accounts } else { vec![] };
+    // let allow_wallets = state.borrow::<bool>();
+    // let accounts = if *allow_wallets { accounts } else { vec![] };
 
     Ok(json!({
-        "session_id": session_id,
-        "accounts": accounts,
-        "contracts": serialized_contracts,
+        "session_id": args.session_id,
+        "accounts": json!([]),
+        "contracts": json!([]),
     })
     .to_string())
 }
@@ -163,28 +150,28 @@ struct TerminateSessionArgs {
     session_id: u32,
 }
 
-pub fn terminate_session(state: &mut OpState, args: Value, _: ()) -> Result<String, AnyError> {
-    let args: TerminateSessionArgs =
-        serde_json::from_value(args).expect("Invalid request from JavaScript for \"op_load\".");
-    let (session_id, accounts, contracts) = complete_setup_chain(args.session_id)?;
-    let serialized_contracts = contracts.iter().map(|(a, s, _)| json!({
-      "contract_id": a.contract_identifier.to_string(),
-      "contract_interface": a.contract_interface.clone(),
-      "dependencies": a.dependencies.clone().into_iter().map(|c| c.to_string()).collect::<Vec<String>>(),
-      "source": s
-    })).collect::<Vec<_>>();
+pub fn terminate_session(state: &mut OpState, args: Value, _: ()) -> Result<(), AnyError> {
+    // let args: TerminateSessionArgs =
+    //     serde_json::from_value(args).expect("Invalid request from JavaScript for \"op_load\".");
+    // let (session_id, accounts, contracts) = complete_setup_chain(args.session_id)?;
+    // let serialized_contracts = contracts.iter().map(|(a, s, _)| json!({
+    //   "contract_id": a.contract_identifier.to_string(),
+    //   "contract_interface": a.contract_interface.clone(),
+    //   "dependencies": a.dependencies.clone().into_iter().map(|c| c.to_string()).collect::<Vec<String>>(),
+    //   "source": s
+    // })).collect::<Vec<_>>();
 
-    let allow_wallets = state.borrow::<bool>();
-    let accounts = if *allow_wallets { accounts } else { vec![] };
+    // let allow_wallets = state.borrow::<bool>();
+    // let accounts = if *allow_wallets { accounts } else { vec![] };
 
-    Ok(json!({
-        "session_id": session_id,
-        "accounts": accounts,
-        "contracts": serialized_contracts,
-    })
-    .to_string())
+    // Ok(json!({
+    //     "session_id": session_id,
+    //     "accounts": accounts,
+    //     "contracts": serialized_contracts,
+    // })
+    // .to_string())
+    Ok(())
 }
-
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -196,7 +183,7 @@ struct MineEmptyBlocksArgs {
 pub fn mine_empty_blocks(state: &mut OpState, args: Value, _: ()) -> Result<String, AnyError> {
     let args: MineEmptyBlocksArgs =
         serde_json::from_value(args).expect("Invalid request from JavaScript.");
-    let block_height = perform_block(args.session_id, |name, session| {
+    let block_height = perform_block(state, args.session_id, |name, session| {
         let block_height = session.advance_chain_tip(args.count);
         Ok(block_height)
     })?;
@@ -221,7 +208,7 @@ struct CallReadOnlyFnArgs {
 pub fn call_read_only_fn(state: &mut OpState, args: Value, _: ()) -> Result<String, AnyError> {
     let args: CallReadOnlyFnArgs =
         serde_json::from_value(args).expect("Invalid request from JavaScript.");
-    let (result, events) = perform_block(args.session_id, |name, session| {
+    let (result, events) = perform_block(state, args.session_id, |name, session| {
         let execution = session
             .invoke_contract_call(
                 &args.contract,
@@ -254,7 +241,7 @@ struct GetAssetsMapsArgs {
 pub fn get_assets_maps(state: &mut OpState, args: Value, _: ()) -> Result<String, AnyError> {
     let args: GetAssetsMapsArgs =
         serde_json::from_value(args).expect("Invalid request from JavaScript.");
-    let assets_maps = perform_block(args.session_id, |name, session| {
+    let assets_maps = perform_block(state, args.session_id, |name, session| {
         let assets_maps = session.get_assets_maps();
         let mut lev1 = BTreeMap::new();
         for (key1, map1) in assets_maps.into_iter() {
@@ -318,7 +305,7 @@ struct TransferSTXArgs {
 pub fn mine_block(state: &mut OpState, args: Value, _: ()) -> Result<String, AnyError> {
     let args: MineBlockArgs =
         serde_json::from_value(args).expect("Invalid request from JavaScript.");
-    let (block_height, receipts) = perform_block(args.session_id, |name, session| {
+    let (block_height, receipts) = perform_block(state, args.session_id, |name, session| {
         let initial_tx_sender = session.get_tx_sender();
         let mut receipts = vec![];
         for tx in args.transactions.iter() {
@@ -358,7 +345,7 @@ pub fn mine_block(state: &mut OpState, args: Value, _: ()) -> Result<String, Any
                         .interpret(
                             args.code.clone(),
                             Some(args.name.clone()),
-                            true,
+                            None,
                             false,
                             Some(name.into()),
                         )
@@ -374,7 +361,7 @@ pub fn mine_block(state: &mut OpState, args: Value, _: ()) -> Result<String, Any
                         args.amount, args.recipient
                     );
                     let execution = session
-                        .interpret(snippet, None, true, false, Some(name.into()))
+                        .interpret(snippet, None, None, false, Some(name.into()))
                         .unwrap(); // TODO(lgalabru)
                     let result = match execution.result {
                         Some(output) => format!("{}", output),
@@ -403,82 +390,20 @@ pub fn mine_block(state: &mut OpState, args: Value, _: ()) -> Result<String, Any
     Ok(payload.to_string())
 }
 
-pub fn handle_setup_chain_v2(
-    manifest_path: &PathBuf,
-    name: String,
-    includes_pre_deployment_steps: bool,
-) -> Result<(u32, &Vec<WalletSpecification>, Vec<(ContractAnalysis, String, String)>), AnyError> {
-    let mut sessions = globals::SESSIONS.lock().unwrap();
-    let session_id = sessions.len() as u32;
-    let session_templated = {
-        let res = globals::SESSION_TEMPLATE.lock().unwrap();
-        !res.is_empty()
-    };
-    let can_use_cache = !includes_pre_deployment_steps && session_templated;
-    let should_update_cache = !includes_pre_deployment_steps;
-
-    let deployment = match read_or_default_to_generated_deployment(&manifest_path, &None) {
-        Ok(deployment) => deployment,
-        Err(message) => {
-            println!("{}", message);
-            std::process::exit(1);
-        }
-    };
-
-    let (mut session, contracts) = if !can_use_cache {
-        let mut session = initiate_session_from_deployment(manifest_path, &deployment);
-        update_session_with_genesis_accounts(&mut session, &deployment);
-        if !includes_pre_deployment_steps {
-            update_session_with_contracts(&mut session, &deployment);
-        }
-        if should_update_cache {
-            globals::SESSION_TEMPLATE.lock().unwrap().push(session.clone());
-        }
-        (session, vec![])
-    } else {
-        let session = SESSION_TEMPLATE.lock().unwrap().last().unwrap().clone();
-        let contracts = session.initial_contracts_analysis.clone();
-        (session, contracts)
-    };
-
-    if !includes_pre_deployment_steps {
-        session.advance_chain_tip(1);
-    }
-
-    let wallets = &deployment.genesis.as_ref().unwrap().wallets;
-
-    sessions.insert(session_id, (name, session, deployment));
-
-    Ok((session_id, wallets, contracts))
-}
-
-pub fn complete_setup_chain(
-    session_id: u32,
-) -> Result<(u32, Vec<Account>, Vec<(ContractAnalysis, String, String)>), AnyError> {
-    let mut sessions = globals::SESSIONS.lock().unwrap();
-    match sessions.get_mut(&session_id) {
-        Some((_, session, deployment)) => {
-            let (_, contracts) = session
-                .interpret_initial_contracts()
-                .expect("Unable to load contracts");
-            session.advance_chain_tip(1);
-            let accounts = session.settings.initial_accounts.clone();
-            Ok((session_id, accounts, contracts))
-        }
-        _ => unreachable!(),
-    }
-}
-
-pub fn perform_block<F, R>(session_id: u32, handler: F) -> Result<R, AnyError>
+pub fn perform_block<F, R>(state: &mut OpState, session_id: u32, handler: F) -> Result<R, AnyError>
 where
     F: FnOnce(&str, &mut Session) -> Result<R, AnyError>,
 {
-    let mut sessions = globals::SESSIONS.lock().unwrap();
+    let sessions = match state.try_borrow_mut::<HashMap<u32, (String, Session)>>() {
+        Some(sessions) => sessions,
+        None => panic!(),
+    };
+
     match sessions.get_mut(&session_id) {
         None => {
             println!("Error: unable to retrieve session");
             panic!()
         }
-        Some((name, ref mut session, deployment)) => handler(name.as_str(), session),
+        Some((name, ref mut session)) => handler(name.as_str(), session),
     }
 }

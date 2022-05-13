@@ -1,6 +1,7 @@
+use super::{api_v2, costs, DeploymentCache};
 use clarity_repl::clarity::coverage::CoverageReporter;
 use clarity_repl::clarity::types;
-use clarity_repl::repl::{Session};
+use clarity_repl::repl::Session;
 use deno::ast;
 use deno::colors;
 use deno::create_main_worker;
@@ -31,8 +32,8 @@ use deno_runtime::permissions::Permissions;
 use regex::Regex;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use std::collections::{HashSet, HashMap};
 use std::collections::{btree_map::Entry, BTreeMap};
+use std::collections::{HashMap, HashSet};
 use std::convert::TryFrom;
 use std::fmt::Write;
 use std::ops::Index;
@@ -44,7 +45,6 @@ use std::sync::mpsc::Sender;
 use std::sync::Arc;
 use std::sync::Mutex;
 use swc_common::comments::CommentKind;
-use super::{api_v2, costs, Cache};
 
 use crate::deployment::types::DeploymentSpecification;
 
@@ -56,7 +56,7 @@ pub async fn do_run_scripts(
     allow_wallets: bool,
     allow_disk_write: bool,
     manifest_path: PathBuf,
-    cache: Cache,
+    cache: DeploymentCache,
 ) -> Result<u32, AnyError> {
     let mut flags = Flags::default();
     flags.unstable = true;
@@ -247,7 +247,8 @@ pub async fn do_run_scripts(
                 )
                 .map(|res| {
                     if include_costs_report {
-                        costs::display_costs_report()
+                        // TODO(lgalabru)
+                        // costs::display_costs_report()
                     }
                     res.map(|_| ())
                 })
@@ -309,7 +310,6 @@ pub async fn do_run_scripts(
     //     costs::display_costs_report()
     // }
 
-
     Ok(0 as u32)
 }
 
@@ -336,7 +336,7 @@ pub async fn run_scripts(
     concurrent_jobs: usize,
     manifest_path: PathBuf,
     allow_wallets: bool,
-    cache: Option<Cache>,
+    cache: Option<DeploymentCache>,
 ) -> Result<bool, AnyError> {
     if !doc_modules.is_empty() {
         let mut test_programs = Vec::new();
@@ -584,46 +584,65 @@ pub async fn run_script(
     channel: Sender<TestEvent>,
     manifest_path: PathBuf,
     allow_wallets: bool,
-    mut cache: Option<Cache>,
+    mut cache: Option<DeploymentCache>,
 ) -> Result<(), AnyError> {
     use std::sync::mpsc;
     let mut worker = create_main_worker(&program_state, main_module.clone(), permissions, true);
     let (event_tx, event_rx) = mpsc::channel();
     {
         let js_runtime = &mut worker.js_runtime;
-        js_runtime.register_op("api/v2/new_session", deno_core::op_sync(api_v2::new_session));
+        js_runtime.register_op(
+            "api/v2/new_session",
+            deno_core::op_sync(api_v2::new_session),
+        );
         js_runtime.register_op(
             "api/v2/load_deployment",
             deno_core::op_sync(api_v2::load_deployment),
         );
-        js_runtime.register_op("api/v2/terminate_session", deno_core::op_sync(api_v2::terminate_session));
+        js_runtime.register_op(
+            "api/v2/terminate_session",
+            deno_core::op_sync(api_v2::terminate_session),
+        );
         js_runtime.register_op("api/v2/mine_block", deno_core::op_sync(api_v2::mine_block));
-        js_runtime.register_op("api/v2/mine_empty_blocks", deno_core::op_sync(api_v2::mine_empty_blocks));
-        js_runtime.register_op("api/v2/call_read_only_fn", deno_core::op_sync(api_v2::call_read_only_fn));
-        js_runtime.register_op("api/v2/get_assets_maps", deno_core::op_sync(api_v2::get_assets_maps));
+        js_runtime.register_op(
+            "api/v2/mine_empty_blocks",
+            deno_core::op_sync(api_v2::mine_empty_blocks),
+        );
+        js_runtime.register_op(
+            "api/v2/call_read_only_fn",
+            deno_core::op_sync(api_v2::call_read_only_fn),
+        );
+        js_runtime.register_op(
+            "api/v2/get_assets_maps",
+            deno_core::op_sync(api_v2::get_assets_maps),
+        );
+
+        // Additionally, we're atching this legacy ops to display a human readable error
+        js_runtime.register_op("setup_chain", deno_core::op_sync(deprecation_notice));
+        js_runtime.register_op("start_setup_chain", deno_core::op_sync(deprecation_notice));
 
         js_runtime.sync_ops_cache();
 
-        js_runtime.op_state().borrow_mut().put(manifest_path);
-
-        js_runtime.op_state().borrow_mut().put(allow_wallets);
-
-        let mut deployments: HashMap<Option<String>, Cache> = HashMap::new();
+        let sessions: HashMap<u32, (String, Session)> = HashMap::new();
+        let mut deployments: HashMap<Option<String>, DeploymentCache> = HashMap::new();
         if let Some(cache) = cache.take() {
             // Using None as key - it will be used as our default deployment
             deployments.insert(None, cache);
         }
+
+        js_runtime.op_state().borrow_mut().put(manifest_path);
+        js_runtime.op_state().borrow_mut().put(allow_wallets);
         js_runtime.op_state().borrow_mut().put(deployments);
-
-        let sessions: HashMap<usize, Session> = HashMap::new();
         js_runtime.op_state().borrow_mut().put(sessions);
-
-        js_runtime.op_state().borrow_mut().put(0u16);
-
+        js_runtime.op_state().borrow_mut().put(0u32);
         js_runtime
             .op_state()
             .borrow_mut()
             .put::<Sender<api_v2::TestEvent>>(event_tx.clone());
+        js_runtime
+            .op_state()
+            .borrow_mut()
+            .put::<Sender<TestEvent>>(channel);
     }
 
     let execute_result = worker.execute_module(&main_module).await;
@@ -651,4 +670,10 @@ pub async fn run_script(
     }
 
     Ok(())
+}
+
+pub fn deprecation_notice(state: &mut OpState, args: Value, _: ()) -> Result<(), AnyError> {
+    println!("{}: this version of clarinet is incompatible with the version of the library being imported in the test files.", red!("error"));
+    println!("The test files should import the latest version.");
+    std::process::exit(1);
 }
