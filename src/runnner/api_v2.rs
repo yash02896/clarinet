@@ -1,23 +1,124 @@
-use crate::deployment::types::DeploymentSpecification;
-use deno_core::error::AnyError;
-use deno_core::serde_json::{self, json, Value};
-use deno_core::{OpFn, OpState};
-use std::borrow::BorrowMut;
-use std::path::PathBuf;
-
 use super::utils;
 use super::DeploymentCache;
+use crate::deployment::types::DeploymentSpecification;
 use clarity_repl::clarity::coverage::TestCoverageReport;
 use clarity_repl::clarity::types;
 use clarity_repl::repl::Session;
+use deno::tools::test_runner::TestEvent;
+use deno::{create_main_worker, ProgramState};
+use deno_core::error::AnyError;
+use deno_core::serde_json::{self, json, Value};
+use deno_core::{ModuleSpecifier, OpFn, OpState};
+use deno_runtime::permissions::Permissions;
 use std::collections::{BTreeMap, HashMap};
+use std::path::PathBuf;
+use std::sync::mpsc::{self, Sender};
+use std::sync::Arc;
 
-pub enum TestEvent {
+pub enum ClarinetTestEvent {
     SessionTerminated(SessionArtifacts),
 }
 
 pub struct SessionArtifacts {
     pub coverage_reports: Vec<TestCoverageReport>,
+}
+
+pub async fn run_bridge(
+    program_state: Arc<ProgramState>,
+    main_module: ModuleSpecifier,
+    test_module: ModuleSpecifier,
+    permissions: Permissions,
+    channel: Sender<TestEvent>,
+    manifest_path: PathBuf,
+    allow_wallets: bool,
+    mut cache: Option<DeploymentCache>,
+) -> Result<(), AnyError> {
+    let mut worker = create_main_worker(&program_state, main_module.clone(), permissions, true);
+    let (event_tx, event_rx) = mpsc::channel();
+    {
+        let js_runtime = &mut worker.js_runtime;
+        js_runtime.register_op("api/v2/new_session", deno_core::op_sync(new_session));
+        js_runtime.register_op(
+            "api/v2/load_deployment",
+            deno_core::op_sync(load_deployment),
+        );
+        js_runtime.register_op(
+            "api/v2/terminate_session",
+            deno_core::op_sync(terminate_session),
+        );
+        js_runtime.register_op("api/v2/mine_block", deno_core::op_sync(mine_block));
+        js_runtime.register_op(
+            "api/v2/mine_empty_blocks",
+            deno_core::op_sync(mine_empty_blocks),
+        );
+        js_runtime.register_op(
+            "api/v2/call_read_only_fn",
+            deno_core::op_sync(call_read_only_fn),
+        );
+        js_runtime.register_op(
+            "api/v2/get_assets_maps",
+            deno_core::op_sync(get_assets_maps),
+        );
+
+        // Additionally, we're catching this legacy ops to display a human readable error
+        js_runtime.register_op("setup_chain", deno_core::op_sync(deprecation_notice));
+        js_runtime.register_op("start_setup_chain", deno_core::op_sync(deprecation_notice));
+
+        js_runtime.sync_ops_cache();
+
+        let sessions: HashMap<u32, (String, Session)> = HashMap::new();
+        let mut deployments: HashMap<Option<String>, DeploymentCache> = HashMap::new();
+        if let Some(cache) = cache.take() {
+            // Using None as key - it will be used as our default deployment
+            deployments.insert(None, cache);
+        }
+
+        js_runtime.op_state().borrow_mut().put(manifest_path);
+        js_runtime.op_state().borrow_mut().put(allow_wallets);
+        js_runtime.op_state().borrow_mut().put(deployments);
+        js_runtime.op_state().borrow_mut().put(sessions);
+        js_runtime.op_state().borrow_mut().put(0u32);
+        js_runtime
+            .op_state()
+            .borrow_mut()
+            .put::<Sender<ClarinetTestEvent>>(event_tx.clone());
+        js_runtime
+            .op_state()
+            .borrow_mut()
+            .put::<Sender<TestEvent>>(channel);
+    }
+
+    let execute_result = worker.execute_module(&main_module).await;
+    if let Err(e) = execute_result {
+        println!("{}", e);
+        return Err(e);
+    }
+
+    let execute_result = worker.execute("window.dispatchEvent(new Event('load'))");
+    if let Err(e) = execute_result {
+        println!("{}", e);
+        return Err(e);
+    }
+
+    let execute_result = worker.execute_module(&test_module).await;
+    if let Err(e) = execute_result {
+        println!("{}", e);
+        return Err(e);
+    }
+
+    let execute_result = worker.execute("window.dispatchEvent(new Event('unload'))");
+    if let Err(e) = execute_result {
+        println!("{}", e);
+        return Err(e);
+    }
+
+    Ok(())
+}
+
+pub fn deprecation_notice(state: &mut OpState, args: Value, _: ()) -> Result<(), AnyError> {
+    println!("{}: clarinet v{} is incompatible with the version of the library being imported in the test files.", red!("error"), option_env!("CARGO_PKG_VERSION").expect("Unable to detect version"));
+    println!("The test files should import the latest version.");
+    std::process::exit(1);
 }
 
 #[derive(Debug, Deserialize)]

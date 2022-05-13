@@ -25,7 +25,7 @@ use std::path::PathBuf;
 
 use crate::deployment::types::DeploymentSpecification;
 
-mod api_v2;
+pub mod api_v2;
 mod costs;
 pub mod deno;
 mod utils;

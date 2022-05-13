@@ -473,7 +473,7 @@ pub async fn run_scripts(
         let manifest = manifest_path.clone();
         tokio::task::spawn_blocking(move || {
             let join_handle = std::thread::spawn(move || {
-                let future = run_script(
+                let future = api_v2::run_bridge(
                     program_state,
                     main_module,
                     test_module,
@@ -574,106 +574,4 @@ pub async fn run_scripts(
     } else {
         Ok(result.unwrap_or(false))
     }
-}
-
-pub async fn run_script(
-    program_state: Arc<ProgramState>,
-    main_module: ModuleSpecifier,
-    test_module: ModuleSpecifier,
-    permissions: Permissions,
-    channel: Sender<TestEvent>,
-    manifest_path: PathBuf,
-    allow_wallets: bool,
-    mut cache: Option<DeploymentCache>,
-) -> Result<(), AnyError> {
-    use std::sync::mpsc;
-    let mut worker = create_main_worker(&program_state, main_module.clone(), permissions, true);
-    let (event_tx, event_rx) = mpsc::channel();
-    {
-        let js_runtime = &mut worker.js_runtime;
-        js_runtime.register_op(
-            "api/v2/new_session",
-            deno_core::op_sync(api_v2::new_session),
-        );
-        js_runtime.register_op(
-            "api/v2/load_deployment",
-            deno_core::op_sync(api_v2::load_deployment),
-        );
-        js_runtime.register_op(
-            "api/v2/terminate_session",
-            deno_core::op_sync(api_v2::terminate_session),
-        );
-        js_runtime.register_op("api/v2/mine_block", deno_core::op_sync(api_v2::mine_block));
-        js_runtime.register_op(
-            "api/v2/mine_empty_blocks",
-            deno_core::op_sync(api_v2::mine_empty_blocks),
-        );
-        js_runtime.register_op(
-            "api/v2/call_read_only_fn",
-            deno_core::op_sync(api_v2::call_read_only_fn),
-        );
-        js_runtime.register_op(
-            "api/v2/get_assets_maps",
-            deno_core::op_sync(api_v2::get_assets_maps),
-        );
-
-        // Additionally, we're catching this legacy ops to display a human readable error
-        js_runtime.register_op("setup_chain", deno_core::op_sync(deprecation_notice));
-        js_runtime.register_op("start_setup_chain", deno_core::op_sync(deprecation_notice));
-
-        js_runtime.sync_ops_cache();
-
-        let sessions: HashMap<u32, (String, Session)> = HashMap::new();
-        let mut deployments: HashMap<Option<String>, DeploymentCache> = HashMap::new();
-        if let Some(cache) = cache.take() {
-            // Using None as key - it will be used as our default deployment
-            deployments.insert(None, cache);
-        }
-
-        js_runtime.op_state().borrow_mut().put(manifest_path);
-        js_runtime.op_state().borrow_mut().put(allow_wallets);
-        js_runtime.op_state().borrow_mut().put(deployments);
-        js_runtime.op_state().borrow_mut().put(sessions);
-        js_runtime.op_state().borrow_mut().put(0u32);
-        js_runtime
-            .op_state()
-            .borrow_mut()
-            .put::<Sender<api_v2::TestEvent>>(event_tx.clone());
-        js_runtime
-            .op_state()
-            .borrow_mut()
-            .put::<Sender<TestEvent>>(channel);
-    }
-
-    let execute_result = worker.execute_module(&main_module).await;
-    if let Err(e) = execute_result {
-        println!("{}", e);
-        return Err(e);
-    }
-
-    let execute_result = worker.execute("window.dispatchEvent(new Event('load'))");
-    if let Err(e) = execute_result {
-        println!("{}", e);
-        return Err(e);
-    }
-
-    let execute_result = worker.execute_module(&test_module).await;
-    if let Err(e) = execute_result {
-        println!("{}", e);
-        return Err(e);
-    }
-
-    let execute_result = worker.execute("window.dispatchEvent(new Event('unload'))");
-    if let Err(e) = execute_result {
-        println!("{}", e);
-        return Err(e);
-    }
-
-    Ok(())
-}
-
-pub fn deprecation_notice(state: &mut OpState, args: Value, _: ()) -> Result<(), AnyError> {
-    println!("{}: clarinet v{} is incompatible with the version of the library being imported in the test files.", red!("error"), option_env!("CARGO_PKG_VERSION").expect("Unable to detect version"));
-    println!("The test files should import the latest version.");
-    std::process::exit(1);
 }
