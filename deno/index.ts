@@ -92,12 +92,12 @@ export interface EmptyBlock {
 }
 
 export interface AssetsMaps {
-  session_id: number,
+  session_id: number;
   assets: {
     [name: string]: {
-      [owner: string]: number
-    }
-  }
+      [owner: string]: number;
+    };
+  };
 }
 
 export class Chain {
@@ -122,22 +122,26 @@ export class Chain {
   }
 
   mineEmptyBlock(count: number): EmptyBlock {
-    let result = JSON.parse((Deno as any).core.opSync("api/v2/mine_empty_blocks", {
-      sessionId: this.sessionId,
-      count: count,
-    }));
+    let result = JSON.parse(
+      (Deno as any).core.opSync("api/v2/mine_empty_blocks", {
+        sessionId: this.sessionId,
+        count: count,
+      }),
+    );
     this.blockHeight = result.block_height;
     let emptyBlock: EmptyBlock = {
       session_id: result.session_id,
-      block_height: result.block_height
-    }
+      block_height: result.block_height,
+    };
     return emptyBlock;
   }
 
   mineEmptyBlockUntil(targetBlockHeight: number): EmptyBlock {
     let count = targetBlockHeight - this.blockHeight;
     if (count < 0) {
-      throw new Error(`Chain tip cannot be moved from ${this.blockHeight} to ${targetBlockHeight}`);
+      throw new Error(
+        `Chain tip cannot be moved from ${this.blockHeight} to ${targetBlockHeight}`,
+      );
     }
     return this.mineEmptyBlock(count);
   }
@@ -148,29 +152,33 @@ export class Chain {
     args: Array<any>,
     sender: string,
   ): ReadOnlyFn {
-    let result = JSON.parse((Deno as any).core.opSync("api/v2/call_read_only_fn", {
-      sessionId: this.sessionId,
-      contract: contract,
-      method: method,
-      args: args,
-      sender: sender,
-    }));  
+    let result = JSON.parse(
+      (Deno as any).core.opSync("api/v2/call_read_only_fn", {
+        sessionId: this.sessionId,
+        contract: contract,
+        method: method,
+        args: args,
+        sender: sender,
+      }),
+    );
     let readOnlyFn: ReadOnlyFn = {
       session_id: result.session_id,
       result: result.result,
-      events: result.events
-    }
+      events: result.events,
+    };
     return readOnlyFn;
   }
 
   getAssetsMaps(): AssetsMaps {
-    let result = JSON.parse((Deno as any).core.opSync("api/v2/get_assets_maps", {
-      sessionId: this.sessionId,
-    }));
+    let result = JSON.parse(
+      (Deno as any).core.opSync("api/v2/get_assets_maps", {
+        sessionId: this.sessionId,
+      }),
+    );
     let assetsMaps: AssetsMaps = {
       session_id: result.session_id,
-      assets: result.assets
-    }
+      assets: result.assets,
+    };
     return assetsMaps;
   }
 }
@@ -190,7 +198,7 @@ type PreSetupFunction = () => Array<Tx>;
 interface UnitTestOptions {
   name: string;
   only?: true;
-  ignore? :true;
+  ignore?: true;
   deploymentPath?: string;
   preDeployment?: PreDeploymentFunction;
   fn: TestFunction;
@@ -199,7 +207,7 @@ interface UnitTestOptions {
 export interface Contract {
   contract_id: string;
   source: string;
-  contract_interface: any
+  contract_interface: any;
 }
 
 export interface StacksNode {
@@ -227,11 +235,13 @@ export class Clarinet {
 
         let hasPreDeploymentSteps = options.preDeployment !== undefined;
 
-        let result = JSON.parse((Deno as any).core.opSync("api/v2/new_session", {
-          name: options.name,
-          loadDeployment: !hasPreDeploymentSteps,
-          deploymentPath: options.deploymentPath
-        }));
+        let result = JSON.parse(
+          (Deno as any).core.opSync("api/v2/new_session", {
+            name: options.name,
+            loadDeployment: !hasPreDeploymentSteps,
+            deploymentPath: options.deploymentPath,
+          }),
+        );
 
         if (options.preDeployment) {
           let chain = new Chain(result["session_id"]);
@@ -241,9 +251,11 @@ export class Clarinet {
           }
           await options.preDeployment(chain, accounts);
 
-          result = JSON.parse((Deno as any).core.opSync("api/v2/load_deployment", {
-            sessionId: chain.sessionId,
-          }));
+          result = JSON.parse(
+            (Deno as any).core.opSync("api/v2/load_deployment", {
+              sessionId: chain.sessionId,
+            }),
+          );
         }
 
         let chain = new Chain(result["session_id"]);
@@ -260,7 +272,6 @@ export class Clarinet {
         JSON.parse((Deno as any).core.opSync("api/v2/terminate_session", {
           sessionId: chain.sessionId,
         }));
-
       },
     });
   }
@@ -270,11 +281,13 @@ export class Clarinet {
       name: "running script",
       async fn() {
         (Deno as any).core.ops();
-        let result = JSON.parse((Deno as any).core.opSync("api/v2/new_session", {
-          name: "running script",
-          loadDeployment: true,
-          deploymentPath: undefined
-        }));
+        let result = JSON.parse(
+          (Deno as any).core.opSync("api/v2/new_session", {
+            name: "running script",
+            loadDeployment: true,
+            deploymentPath: undefined,
+          }),
+        );
         let accounts: Map<string, Account> = new Map();
         for (let account of result["accounts"]) {
           accounts.set(account.name, account);
@@ -284,13 +297,12 @@ export class Clarinet {
           contracts.set(contract.contract_id, contract);
         }
         let stacks_node: StacksNode = {
-          url: result["stacks_node_url"]
+          url: result["stacks_node_url"],
         };
         await options.fn(accounts, contracts, stacks_node);
       },
     });
   }
-
 }
 
 export namespace types {
@@ -338,11 +350,11 @@ export namespace types {
     return `${val}`;
   }
 
-  export function int(val: number|bigint) {
+  export function int(val: number | bigint) {
     return `${val}`;
   }
 
-  export function uint(val: number|bigint) {
+  export function uint(val: number | bigint) {
     return `u${val}`;
   }
 
@@ -355,8 +367,9 @@ export namespace types {
   }
 
   export function buff(val: ArrayBuffer | string) {
-    
-    const buff =  typeof val == "string" ? new TextEncoder().encode(val) : new Uint8Array(val);
+    const buff = typeof val == "string"
+      ? new TextEncoder().encode(val)
+      : new Uint8Array(val);
 
     const hexOctets = new Array(buff.length);
 
@@ -387,8 +400,8 @@ declare global {
     expectSome(): String;
     expectNone(): void;
     expectBool(value: boolean): boolean;
-    expectUint(value: number|bigint): bigint;
-    expectInt(value: number|bigint): bigint;
+    expectUint(value: number | bigint): bigint;
+    expectInt(value: number | bigint): bigint;
     expectBuff(value: ArrayBuffer): ArrayBuffer;
     expectAscii(value: String): String;
     expectUtf8(value: String): String;
@@ -399,48 +412,48 @@ declare global {
 
   interface Array<T> {
     expectSTXTransferEvent(
-      amount: Number|bigint,
+      amount: Number | bigint,
       sender: String,
       recipient: String,
     ): Object;
     expectFungibleTokenTransferEvent(
-      amount: Number|bigint,
+      amount: Number | bigint,
       sender: String,
       recipient: String,
       assetId: String,
     ): Object;
     expectFungibleTokenMintEvent(
-      amount: Number|bigint,
+      amount: Number | bigint,
       recipient: String,
       assetId: String,
     ): Object;
     expectFungibleTokenBurnEvent(
-      amount: Number|bigint,
+      amount: Number | bigint,
       sender: String,
       assetId: String,
     ): Object;
     expectPrintEvent(
-      contract_identifier: string, 
-      value: string
+      contract_identifier: string,
+      value: string,
     ): Object;
     expectNonFungibleTokenTransferEvent(
-      tokenId: String, 
-      sender: String, 
-      recipient: String, 
+      tokenId: String,
+      sender: String,
+      recipient: String,
       assetAddress: String,
-      assetId: String
+      assetId: String,
     ): Object;
     expectNonFungibleTokenMintEvent(
-      tokenId: String, 
-      recipient: String, 
+      tokenId: String,
+      recipient: String,
       assetAddress: String,
-      assetId: String
+      assetId: String,
     ): Object;
     expectNonFungibleTokenBurnEvent(
-      tokenId: String, 
-      sender: String, 
+      tokenId: String,
+      sender: String,
       assetAddress: String,
-      assetId: String
+      assetId: String,
     ): Object;
     // expectEvent(sel: (e: Object) => Object): Object;
   }
@@ -504,7 +517,7 @@ String.prototype.expectBool = function (value: boolean) {
   return value;
 };
 
-String.prototype.expectUint = function (value: number|bigint):bigint {
+String.prototype.expectUint = function (value: number | bigint): bigint {
   try {
     consume(this, `u${value}`, false);
   } catch (error) {
@@ -513,7 +526,7 @@ String.prototype.expectUint = function (value: number|bigint):bigint {
   return BigInt(value);
 };
 
-String.prototype.expectInt = function (value: number|bigint):bigint {
+String.prototype.expectInt = function (value: number | bigint): bigint {
   try {
     consume(this, `${value}`, false);
   } catch (error) {
@@ -641,7 +654,7 @@ String.prototype.expectTuple = function () {
 };
 
 Array.prototype.expectSTXTransferEvent = function (
-  amount: Number|bigint,
+  amount: Number | bigint,
   sender: String,
   recipient: String,
 ) {
@@ -693,7 +706,7 @@ Array.prototype.expectFungibleTokenTransferEvent = function (
 };
 
 Array.prototype.expectFungibleTokenMintEvent = function (
-  amount: Number|bigint,
+  amount: Number | bigint,
   recipient: String,
   assetId: String,
 ) {
@@ -716,7 +729,7 @@ Array.prototype.expectFungibleTokenMintEvent = function (
 };
 
 Array.prototype.expectFungibleTokenBurnEvent = function (
-  amount: Number|bigint,
+  amount: Number | bigint,
   sender: String,
   assetId: String,
 ) {
@@ -740,14 +753,14 @@ Array.prototype.expectFungibleTokenBurnEvent = function (
 
 Array.prototype.expectPrintEvent = function (
   contract_identifier: string,
-  value: string
+  value: string,
 ) {
   for (let event of this) {
     try {
       let e: any = {};
-      e["contract_identifier"] =
-        event.contract_event.contract_identifier.expectPrincipal(
-          contract_identifier
+      e["contract_identifier"] = event.contract_event.contract_identifier
+        .expectPrincipal(
+          contract_identifier,
         );
 
       if (event.contract_event.topic.endsWith("print")) {
@@ -779,24 +792,29 @@ Array.prototype.expectPrintEvent = function (
 //     }
 //     throw new Error(`Unable to retrieve expected PrintEvent`);
 // }
-Array.prototype.expectNonFungibleTokenTransferEvent = function(
-  tokenId: String, 
-  sender: String, 
-  recipient: String, 
-  assetAddress: String, 
-  assetId: String
-  ) {
+Array.prototype.expectNonFungibleTokenTransferEvent = function (
+  tokenId: String,
+  sender: String,
+  recipient: String,
+  assetAddress: String,
+  assetId: String,
+) {
   for (let event of this) {
     try {
       let e: any = {};
-      if(event.nft_transfer_event.value === tokenId) {
+      if (event.nft_transfer_event.value === tokenId) {
         e["tokenId"] = event.nft_transfer_event.value;
       } else {
         continue;
       }
       e["sender"] = event.nft_transfer_event.sender.expectPrincipal(sender);
-      e["recipient"] = event.nft_transfer_event.recipient.expectPrincipal(recipient);
-      if (event.nft_transfer_event.asset_identifier === `${assetAddress}::${assetId}`) {
+      e["recipient"] = event.nft_transfer_event.recipient.expectPrincipal(
+        recipient,
+      );
+      if (
+        event.nft_transfer_event.asset_identifier ===
+          `${assetAddress}::${assetId}`
+      ) {
         e["assetId"] = event.nft_transfer_event.asset_identifier;
       } else {
         continue;
@@ -807,24 +825,28 @@ Array.prototype.expectNonFungibleTokenTransferEvent = function(
     }
   }
   throw new Error(`Unable to retrieve expected NonFungibleTokenTransferEvent`);
-}
+};
 
-Array.prototype.expectNonFungibleTokenMintEvent = function(
-  tokenId: String, 
-  recipient: String, 
+Array.prototype.expectNonFungibleTokenMintEvent = function (
+  tokenId: String,
+  recipient: String,
   assetAddress: String,
-  assetId: String
-  ) {
+  assetId: String,
+) {
   for (let event of this) {
     try {
       let e: any = {};
-      if(event.nft_mint_event.value === tokenId) {
+      if (event.nft_mint_event.value === tokenId) {
         e["tokenId"] = event.nft_mint_event.value;
       } else {
         continue;
       }
-      e["recipient"] = event.nft_mint_event.recipient.expectPrincipal(recipient);
-      if (event.nft_mint_event.asset_identifier === `${assetAddress}::${assetId}`) {
+      e["recipient"] = event.nft_mint_event.recipient.expectPrincipal(
+        recipient,
+      );
+      if (
+        event.nft_mint_event.asset_identifier === `${assetAddress}::${assetId}`
+      ) {
         e["assetId"] = event.nft_mint_event.asset_identifier;
       } else {
         continue;
@@ -835,24 +857,26 @@ Array.prototype.expectNonFungibleTokenMintEvent = function(
     }
   }
   throw new Error(`Unable to retrieve expected NonFungibleTokenMintEvent`);
-}
+};
 
-Array.prototype.expectNonFungibleTokenBurnEvent = function(
-  tokenId: String, 
-  sender: String, 
+Array.prototype.expectNonFungibleTokenBurnEvent = function (
+  tokenId: String,
+  sender: String,
   assetAddress: String,
-  assetId: String
-  ) {
+  assetId: String,
+) {
   for (let event of this) {
     try {
       let e: any = {};
-      if(event.nft_burn_event.value === tokenId) {
+      if (event.nft_burn_event.value === tokenId) {
         e["tokenId"] = event.nft_burn_event.value;
       } else {
         continue;
       }
       e["sender"] = event.nft_burn_event.sender.expectPrincipal(sender);
-      if (event.nft_burn_event.asset_identifier === `${assetAddress}::${assetId}`) {
+      if (
+        event.nft_burn_event.asset_identifier === `${assetAddress}::${assetId}`
+      ) {
         e["assetId"] = event.nft_burn_event.asset_identifier;
       } else {
         continue;
@@ -863,7 +887,7 @@ Array.prototype.expectNonFungibleTokenBurnEvent = function(
     }
   }
   throw new Error(`Unable to retrieve expected NonFungibleTokenBurnEvent`);
-}
+};
 
 const noColor = globalThis.Deno?.noColor ?? true;
 
