@@ -47,8 +47,14 @@ impl LanguageServer for ClarityLanguageBackend {
         Ok(InitializeResult {
             server_info: None,
             capabilities: ServerCapabilities {
-                text_document_sync: Some(TextDocumentSyncCapability::Kind(
-                    TextDocumentSyncKind::Full,
+                text_document_sync: Some(TextDocumentSyncCapability::Options(
+                    TextDocumentSyncOptions {
+                        open_close: Some(true),
+                        change: Some(TextDocumentSyncKind::Full),
+                        will_save: Some(true),
+                        will_save_wait_until: Some(false),
+                        save: Some(TextDocumentSyncSaveOptions::Supported(true)),
+                    },
                 )),
                 completion_provider: Some(CompletionOptions {
                     resolve_provider: Some(false),
@@ -127,7 +133,7 @@ impl LanguageServer for ClarityLanguageBackend {
                 Err(_) => return,
             };
             response_rx
-        } else if let Some(manifest_path) = get_contract_file(&params.text_document.uri) {
+        } else if let Some(manifest_path) = get_manifest_file(&params.text_document.uri) {
             let (response_tx, response_rx) = channel();
             let _ = match self.command_tx.lock() {
                 Ok(tx) => tx.send(LspRequest::ManifestOpened(manifest_path, response_tx)),
@@ -135,10 +141,19 @@ impl LanguageServer for ClarityLanguageBackend {
             };
             response_rx
         } else {
+            self.client
+                .log_message(MessageType::Warning, "Unsupported file opened")
+                .await;
             return;
         };
 
-        if let Ok(ref mut response) = response_rx.recv() {
+        self.client
+            .log_message(
+                MessageType::Warning,
+                "Command submitted to background thread",
+            )
+            .await;
+        let (contracts, tldr) = if let Ok(ref mut response) = response_rx.recv() {
             if !response.contracts_updates.is_empty() {
                 if let Ok(ref mut protocol_state_writer) = self.protocol_state.write() {
                     if response.state_cleared {
@@ -146,11 +161,24 @@ impl LanguageServer for ClarityLanguageBackend {
                     }
                     protocol_state_writer.ingest_contracts_updates(&mut response.contracts_updates);
                 }
-                self.publish_diagnostics(vec![], None);
+                match self.protocol_state.read() {
+                    Ok(protocol_state) => protocol_state.get_aggregated_diagnostics(),
+                    Err(_) => (vec![], None),
+                }
+            } else {
+                (vec![], None)
             }
+        } else {
+            (vec![], None)
+        };
+
+        self.client.log_message(MessageType::Error, "3").await;
+        for (url, diags) in contracts.into_iter() {
+            self.client.publish_diagnostics(url, diags, None).await;
         }
-        // self.publish_diagnostics(vec![], None).await;
-        // self.client.publish_diagnostics(params.text_document.uri, vec![], None).await;
+        if let Some((level, message)) = tldr {
+            self.client.show_message(level, message).await;
+        }
     }
 
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
@@ -181,12 +209,11 @@ impl LanguageServer for ClarityLanguageBackend {
                     }
                     protocol_state_writer.ingest_contracts_updates(&mut response.contracts_updates);
                 }
-                self.publish_diagnostics(vec![], None);
             }
         }
     }
 
-    async fn did_change(&self, changes: DidChangeTextDocumentParams) {}
+    async fn did_change(&self, _changes: DidChangeTextDocumentParams) {}
 
     async fn did_close(&self, _: DidCloseTextDocumentParams) {}
 
@@ -229,7 +256,10 @@ fn get_manifest_file(text_document_uri: &Url) -> Option<PathBuf> {
 
 fn get_contract_file(text_document_uri: &Url) -> Option<PathBuf> {
     match text_document_uri.to_file_path() {
-        Ok(path) if path.ends_with(".clar") => Some(path),
+        Ok(path) => match path.extension() {
+            Some(ext) if ext.to_str() == Some("clar") => Some(path),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -241,106 +271,4 @@ fn get_file_name(uri: &Url) -> Option<String> {
         .and_then(|f| f.file_name())
         .and_then(|f| f.to_str())
         .and_then(|f| Some(f.to_string()))
-}
-
-impl ClarityLanguageBackend {
-    async fn reset_diagnostics(&self, file: &Option<Url>) -> bool {
-        let protocol_state_reader = match self.protocol_state.read() {
-            Ok(protocol_state_reader) => protocol_state_reader,
-            _ => return false,
-        };
-        if let Some(file) = file {
-            self.client
-                .publish_diagnostics(file.clone(), vec![], None)
-                .await;
-        } else {
-            for (contract_url, _) in protocol_state_reader.contracts.iter() {
-                self.client
-                    .publish_diagnostics(contract_url.clone(), vec![], None)
-                    .await;
-            }
-        }
-        true
-    }
-
-    async fn publish_diagnostics(&self, logs: Vec<String>, file: Option<Url>) -> bool {
-        for m in logs.iter() {
-            self.client.log_message(MessageType::Info, m).await;
-        }
-
-        self.reset_diagnostics(&file);
-
-        let protocol_state_reader = match self.protocol_state.read() {
-            Ok(protocol_state_reader) => protocol_state_reader,
-            _ => return false,
-        };
-        if let Some(ref file) = file {
-        } else {
-            let mut erroring_files = HashSet::new();
-            let mut warning_files = HashSet::new();
-
-            for (contract_url, state) in protocol_state_reader.contracts.iter() {
-                let mut diags = vec![];
-
-                // Convert and collect errors
-                if !state.errors.is_empty() {
-                    if let Some(file_name) = get_file_name(contract_url) {
-                        erroring_files.insert(file_name);
-                    }
-                    for error in state.errors.iter() {
-                        diags.push(error.clone());
-                    }
-                }
-
-                // Convert and collect warnings
-                if !state.warnings.is_empty() {
-                    if let Some(file_name) = get_file_name(contract_url) {
-                        warning_files.insert(file_name);
-                    }
-                    for warning in state.errors.iter() {
-                        diags.push(warning.clone());
-                    }
-                }
-
-                // Convert and collect notes
-                for note in state.notes.iter() {
-                    diags.push(note.clone());
-                }
-
-                // Publish collected diagnostics
-                self.client
-                    .publish_diagnostics(contract_url.clone(), diags, None)
-                    .await;
-            }
-
-            let res = match (erroring_files.len(), warning_files.len()) {
-                (0, 0) => None,
-                (0, warnings) if warnings > 0 => Some((
-                    MessageType::Warning,
-                    format!(
-                        "Warning detected in following contracts: {}",
-                        warning_files.into_iter().collect::<Vec<_>>().join(", ")
-                    ),
-                )),
-                (errors, 0) if errors > 0 => Some((
-                    MessageType::Error,
-                    format!(
-                        "Errors detected in following contracts: {}",
-                        erroring_files.into_iter().collect::<Vec<_>>().join(", ")
-                    ),
-                )),
-                (_errors, _warnings) => Some((
-                    MessageType::Error,
-                    format!(
-                        "Errors and warnings detected in following contracts: {}",
-                        erroring_files.into_iter().collect::<Vec<_>>().join(", ")
-                    ),
-                )),
-            };
-            if let Some((level, message)) = res {
-                self.client.show_message(level, message).await;
-            }
-        }
-        true
-    }
 }

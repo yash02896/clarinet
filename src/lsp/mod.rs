@@ -80,6 +80,7 @@ pub struct ContractState {
     notes: Vec<Diagnostic>,
     contract_id: QualifiedContractIdentifier,
     analysis: Option<ContractAnalysis>,
+    path: PathBuf,
 }
 
 impl ContractState {
@@ -89,6 +90,7 @@ impl ContractState {
         deps: DependencySet,
         mut diags: Vec<ClarityDiagnostic>,
         analysis: Option<ContractAnalysis>,
+        path: PathBuf,
     ) -> ContractState {
         let mut errors = vec![];
         let mut warnings = vec![];
@@ -120,6 +122,7 @@ impl ContractState {
             warnings,
             notes,
             analysis,
+            path,
         }
     }
 }
@@ -155,7 +158,7 @@ impl ProtocolState {
         // TODO(lgalabru)
 
         // Add / Replace new paths
-        for (contract_id, (url, _)) in paths.iter() {
+        for (contract_id, (url, path)) in paths.iter() {
             let (contract_id, ast) = match asts.remove_entry(&contract_id) {
                 Some(ast) => ast,
                 None => continue,
@@ -173,7 +176,8 @@ impl ProtocolState {
                 None => None,
             };
 
-            let contract_state = ContractState::new(contract_id, ast, deps, diags, analysis);
+            let contract_state =
+                ContractState::new(contract_id, ast, deps, diags, analysis, path.clone());
             self.contracts.insert(url.clone(), contract_state.clone());
             changes.push((url.clone(), contract_state));
         }
@@ -207,6 +211,71 @@ impl ProtocolState {
         keywords.append(&mut contract_keywords);
         keywords.append(&mut contract_calls);
         keywords
+    }
+
+    pub fn get_aggregated_diagnostics(
+        &self,
+    ) -> (Vec<(Url, Vec<Diagnostic>)>, Option<(MessageType, String)>) {
+        let mut contracts = vec![];
+        let mut erroring_files = HashSet::new();
+        let mut warning_files = HashSet::new();
+
+        for (contract_url, state) in self.contracts.iter() {
+            let mut diags = vec![];
+
+            // Convert and collect errors
+            if !state.errors.is_empty() {
+                if let Some(file_name) = state.path.file_name().and_then(|f| f.to_str()) {
+                    erroring_files.insert(file_name);
+                }
+                for error in state.errors.iter() {
+                    diags.push(error.clone());
+                }
+            }
+
+            // Convert and collect warnings
+            if !state.warnings.is_empty() {
+                if let Some(file_name) = state.path.file_name().and_then(|f| f.to_str()) {
+                    warning_files.insert(file_name);
+                }
+                for warning in state.warnings.iter() {
+                    diags.push(warning.clone());
+                }
+            }
+
+            // Convert and collect notes
+            for note in state.notes.iter() {
+                diags.push(note.clone());
+            }
+            contracts.push((contract_url.clone(), diags));
+        }
+
+        let tldr = match (erroring_files.len(), warning_files.len()) {
+            (0, 0) => None,
+            (0, warnings) if warnings > 0 => Some((
+                MessageType::Warning,
+                format!(
+                    "Warning detected in following contracts: {}",
+                    warning_files.into_iter().collect::<Vec<_>>().join(", ")
+                ),
+            )),
+            (errors, 0) if errors > 0 => Some((
+                MessageType::Error,
+                format!(
+                    "Errors detected in following contracts: {}",
+                    erroring_files.into_iter().collect::<Vec<_>>().join(", ")
+                ),
+            )),
+            (_errors, _warnings) => Some((
+                MessageType::Error,
+                format!(
+                    "Errors and warnings detected in following contracts: {}",
+                    erroring_files.into_iter().collect::<Vec<_>>().join(", ")
+                ),
+            )),
+        };
+
+        (contracts, tldr)
     }
 }
 
