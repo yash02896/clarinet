@@ -20,6 +20,7 @@ use crate::types::{
 use crate::utils::mnemonic;
 use crate::utils::stacks::StacksRpc;
 use clarity_repl::analysis::ast_dependency_detector::{ASTDependencyDetector, DependencySet};
+use clarity_repl::clarity::analysis::ContractAnalysis;
 use clarity_repl::clarity::ast::ContractAST;
 use clarity_repl::clarity::codec::transaction::{
     StacksTransaction, StacksTransactionSigner, TransactionAnchorMode, TransactionAuth,
@@ -181,13 +182,15 @@ pub fn encode_contract_publish(
 pub fn setup_session_with_deployment(
     manifest_path: &PathBuf,
     deployment: &DeploymentSpecification,
+    contracts_asts: &Option<BTreeMap<QualifiedContractIdentifier, ContractAST>>,
 ) -> (
     Session,
     BTreeMap<QualifiedContractIdentifier, Result<ExecutionResult, Vec<Diagnostic>>>,
 ) {
     let mut session = initiate_session_from_deployment(&manifest_path);
     update_session_with_genesis_accounts(&mut session, deployment);
-    let results = update_session_with_contracts(&mut session, deployment);
+    let results =
+        update_session_with_contracts_executions(&mut session, deployment, contracts_asts);
     (session, results)
 }
 
@@ -221,9 +224,10 @@ pub fn update_session_with_genesis_accounts(
     }
 }
 
-pub fn update_session_with_contracts(
+pub fn update_session_with_contracts_executions(
     session: &mut Session,
     deployment: &DeploymentSpecification,
+    contracts_asts: &Option<BTreeMap<QualifiedContractIdentifier, ContractAST>>,
 ) -> BTreeMap<QualifiedContractIdentifier, Result<ExecutionResult, Vec<Diagnostic>>> {
     let mut results = BTreeMap::new();
     for batch in deployment.plan.batches.iter() {
@@ -234,6 +238,12 @@ pub fn update_session_with_contracts(
                 TransactionSpecification::EmulatedContractPublish(tx) => {
                     let default_tx_sender = session.get_tx_sender();
                     session.set_tx_sender(tx.emulated_sender.to_string());
+
+                    let contract_id = QualifiedContractIdentifier::new(
+                        tx.emulated_sender.clone(),
+                        tx.contract.clone(),
+                    );
+
                     let result = session.interpret(
                         tx.source.clone(),
                         Some(tx.contract.to_string()),
@@ -241,10 +251,7 @@ pub fn update_session_with_contracts(
                         false,
                         None,
                     );
-                    let contract_id = QualifiedContractIdentifier::new(
-                        tx.emulated_sender.clone(),
-                        tx.contract.clone(),
-                    );
+
                     results.insert(contract_id, result);
                     session.set_tx_sender(default_tx_sender);
                 }
@@ -260,6 +267,64 @@ pub fn update_session_with_contracts(
             }
         }
         session.advance_chain_tip(1);
+    }
+    results
+}
+
+pub fn update_session_with_contracts_analyses(
+    session: &mut Session,
+    deployment: &DeploymentSpecification,
+    contracts_asts: &BTreeMap<QualifiedContractIdentifier, ContractAST>,
+) -> BTreeMap<
+    QualifiedContractIdentifier,
+    Result<(ContractAnalysis, Vec<Diagnostic>), Vec<Diagnostic>>,
+> {
+    let mut results = BTreeMap::new();
+    for batch in deployment.plan.batches.iter() {
+        for transaction in batch.transactions.iter() {
+            match transaction {
+                TransactionSpecification::EmulatedContractCall(_)
+                | TransactionSpecification::ContractCall(_)
+                | TransactionSpecification::ContractPublish(_) => {}
+                TransactionSpecification::EmulatedContractPublish(tx) => {
+                    let mut diagnostics = vec![];
+
+                    let default_tx_sender = session.get_tx_sender();
+                    session.set_tx_sender(tx.emulated_sender.to_string());
+
+                    let contract_id = QualifiedContractIdentifier::new(
+                        tx.emulated_sender.clone(),
+                        tx.contract.clone(),
+                    );
+
+                    if let Some(ast) = contracts_asts.get(&contract_id) {
+                        let (annotations, mut annotation_diagnostics) =
+                            session.interpreter.collect_annotations(&ast, &tx.source);
+                        diagnostics.append(&mut annotation_diagnostics);
+                        let mut ast = ast.clone();
+
+                        let (analysis, mut analysis_diagnostics) = match session
+                            .interpreter
+                            .run_analysis(contract_id.clone(), &mut ast, &annotations)
+                        {
+                            Ok((analysis, diagnostics)) => (analysis, diagnostics),
+                            Err((_, Some(diagnostic), _)) => {
+                                diagnostics.push(diagnostic);
+                                results.insert(contract_id, Err(diagnostics));
+                                continue;
+                            }
+                            Err(_) => {
+                                continue;
+                            }
+                        };
+                        diagnostics.append(&mut analysis_diagnostics);
+                        results.insert(contract_id, Ok((analysis, diagnostics)));
+                    }
+
+                    session.set_tx_sender(default_tx_sender);
+                }
+            }
+        }
     }
     results
 }
@@ -305,7 +370,8 @@ pub fn read_or_default_to_generated_deployment(
     let deployment = if default_deployment_file_path.exists() {
         load_deployment(manifest_path, &default_deployment_file_path)?
     } else {
-        generate_default_deployment(manifest_path, network)?
+        let (deployement, _) = generate_default_deployment(manifest_path, network)?;
+        deployement
     };
     Ok(deployment)
 }
@@ -619,7 +685,15 @@ pub fn write_deployment(
 pub fn generate_default_deployment(
     manifest_path: &PathBuf,
     network: &Option<StacksNetwork>,
-) -> Result<DeploymentSpecification, String> {
+) -> Result<
+    (
+        DeploymentSpecification,
+        BTreeMap<QualifiedContractIdentifier, (ContractAST, DependencySet, Vec<Diagnostic>)>,
+    ),
+    String,
+> {
+    let mut artifacts = BTreeMap::new();
+
     let mut project_config = ProjectManifest::from_path(&manifest_path);
     let chain_config = ChainConfig::from_manifest_path(&manifest_path, &network);
 
@@ -796,34 +870,42 @@ pub fn generate_default_deployment(
     let session = Session::new(settings);
 
     let mut contract_asts = HashMap::new();
+    let mut contract_diags = HashMap::new();
 
     for (contract_id, contract) in contracts.iter() {
-        let (ast, _, _) =
+        let (ast, diags, _) =
             session
                 .interpreter
                 .build_ast(contract_id.clone(), contract.source.clone(), 2);
         contract_asts.insert(contract_id.clone(), ast);
+        contract_diags.insert(contract_id.clone(), diags);
     }
 
     let dependencies = ASTDependencyDetector::detect_dependencies(
         &contract_asts,
         &session.get_boot_contracts_asts(),
     );
-    let mut ordered_contracts_ids = vec![];
-    match dependencies {
-        Ok(ref dependencies) => match ASTDependencyDetector::order_contracts(dependencies) {
-            Ok(ref mut contracts) => ordered_contracts_ids.append(contracts),
-            Err(e) => return Err(format!("unable order contracts {}", e)),
-        },
-        Err((_resolved, missing)) => {
+
+    let mut dependencies = match dependencies {
+        Ok(dependencies) => dependencies,
+        Err((dependencies, missing)) => {
             // TODO(lgalabru): do something
             println!("==> {:?}", missing);
+            dependencies
         }
-    }
+    };
+
+    let ordered_contracts_ids = match ASTDependencyDetector::order_contracts(&dependencies) {
+        Ok(ordered_contracts_ids) => ordered_contracts_ids
+            .into_iter()
+            .map(|c| c.clone())
+            .collect::<Vec<_>>(),
+        Err(e) => return Err(format!("unable order contracts {}", e)),
+    };
 
     for contract_id in ordered_contracts_ids.into_iter() {
         let data = contracts
-            .remove(contract_id)
+            .remove(&contract_id)
             .expect("unable to retrieve contract");
         contracts_map.insert(
             contract_id.clone(),
@@ -841,6 +923,14 @@ pub fn generate_default_deployment(
         };
 
         transactions.push(tx);
+
+        let contract_id = contract_id.clone();
+        // TODO(lgalabru): to be cleaned
+        let dep = dependencies.remove(&contract_id).unwrap();
+        let ast = contract_asts.remove(&contract_id).unwrap();
+        let diags = contract_diags.remove(&contract_id).unwrap();
+
+        artifacts.insert(contract_id, (ast, dep, diags));
     }
 
     let tx_chain_limit = 25;
@@ -902,14 +992,7 @@ pub fn generate_default_deployment(
     // settings.repl_settings = project_config.repl_settings.clone();
     // settings.disk_cache_enabled = true;
 
-    Ok(deployment)
-}
-
-pub fn create_default_test_deployment(
-    manifest_path: &PathBuf,
-) -> Result<DeploymentSpecification, String> {
-    let deployment = generate_default_deployment(&manifest_path, &None)?;
-    Ok(deployment)
+    Ok((deployment, artifacts))
 }
 
 pub fn display_deployment(deployment: &DeploymentSpecification) {}

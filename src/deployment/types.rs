@@ -333,6 +333,7 @@ pub struct DeploymentSpecification {
     #[serde(rename = "start-block")]
     pub start_block: u64,
     pub plan: TransactionPlanSpecification,
+    // Keep a cache of contract's (source, relative_path)
     #[serde(skip_serializing, skip_deserializing)]
     pub contracts: BTreeMap<QualifiedContractIdentifier, (String, String)>,
 }

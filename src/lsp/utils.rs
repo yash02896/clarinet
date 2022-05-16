@@ -10,9 +10,11 @@ use clarity_repl::clarity::variables::NativeVariables;
 use tower_lsp::lsp_types::Diagnostic as LspDiagnostic;
 use tower_lsp::lsp_types::*;
 
-use super::clarity_language_backend::CompletionMaps;
+use super::CompletionMaps;
 
-pub fn convert_clarity_diagnotic_to_lsp_diagnostic(diagnostic: ClarityDiagnostic) -> LspDiagnostic {
+pub fn convert_clarity_diagnotic_to_lsp_diagnostic(
+    diagnostic: &ClarityDiagnostic,
+) -> LspDiagnostic {
     let range = match diagnostic.spans.len() {
         0 => Range::default(),
         _ => Range {
@@ -37,7 +39,7 @@ pub fn convert_clarity_diagnotic_to_lsp_diagnostic(diagnostic: ClarityDiagnostic
         code: None,
         code_description: None,
         source: Some("clarity".to_string()),
-        message: diagnostic.message,
+        message: diagnostic.message.clone(),
         related_information: None,
         tags: None,
         data: None,
@@ -196,6 +198,7 @@ pub fn build_intellisense(analysis: &ContractAnalysis) -> CompletionMaps {
     CompletionMaps {
         inter_contract,
         intra_contract,
+        data_fields: vec![],
     }
 }
 

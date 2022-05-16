@@ -1,373 +1,42 @@
-use clarity_repl::clarity::analysis::ContractAnalysis;
-use clarity_repl::repl::{Session, SessionSettings};
-
+use super::{utils, LspRequest, ProtocolState};
 use serde_json::Value;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::PathBuf;
+use std::sync::mpsc::channel;
+use std::sync::mpsc::Sender;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::RwLock;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{async_trait, Client, LanguageServer};
 
-use clarity_repl::clarity::types::QualifiedContractIdentifier;
-use std::collections::{HashMap, HashSet};
-use std::fs;
-use std::path::PathBuf;
-use std::str::FromStr;
-use std::sync::RwLock;
-
-use super::utils;
-use crate::deployment::read_or_default_to_generated_deployment;
-use crate::types::StacksNetwork;
-
-#[allow(dead_code)]
-#[derive(Debug)]
-enum Symbol {
-    PublicFunction,
-    ReadonlyFunction,
-    PrivateFunction,
-    ImportedTrait,
-    LocalVariable,
-    Constant,
-    DataMap,
-    DataVar,
-    FungibleToken,
-    NonFungibleToken,
-}
-
-#[derive(Debug)]
-pub struct CompletionMaps {
-    pub inter_contract: Vec<CompletionItem>,
-    pub intra_contract: Vec<CompletionItem>,
-}
-
-#[derive(Debug)]
-pub struct ContractState {
-    analysis: ContractAnalysis,
-    intellisense: CompletionMaps,
-    session: Session,
-    // TODO(lgalabru)
-    // hash: Vec<u8>,
-    // symbols: HashMap<String, Symbol>,
-}
-
 type Logs = Vec<String>;
+
+// The LSP is being initialized when clarity files are being detected in the project.
+// We want the LSP to be notified when 2 kind of edits happened:
+// - .clar file opened:
+//      - if the state is empty
+//      - if the state is ready
+// - Clarinet.toml file saved
+// - .clar files saved
+//      - if indexed in `Clarinet.toml`:
+//      - if not indexed:
+// - Clarinet.toml file saved
 
 #[derive(Debug)]
 pub struct ClarityLanguageBackend {
-    clarinet_toml_path: RwLock<Option<PathBuf>>,
-    contracts: RwLock<HashMap<Url, ContractState>>,
     client: Client,
-    native_functions: Vec<CompletionItem>,
+    command_tx: Arc<Mutex<Sender<LspRequest>>>,
+    protocol_state: RwLock<ProtocolState>,
 }
 
 impl ClarityLanguageBackend {
-    pub fn new(client: Client) -> Self {
+    pub fn new(client: Client, command_tx: Sender<LspRequest>) -> Self {
         Self {
-            clarinet_toml_path: RwLock::new(None),
-            contracts: RwLock::new(HashMap::new()),
             client,
-            native_functions: utils::build_default_native_keywords_list(),
-        }
-    }
-
-    pub fn run_full_analysis(
-        &self,
-    ) -> std::result::Result<(HashMap<Url, Vec<Diagnostic>>, Logs), (String, Logs)> {
-        let mut logs = vec![];
-        logs.push("Full analysis will start".into());
-
-        // Retrieve ./Clarinet.toml and settings/Devnet.toml paths
-        let deployment = match self.get_config_files_paths() {
-            Err(message) => return Err((message, logs)),
-            Ok(Some(clarinet_toml_path)) => {
-                match read_or_default_to_generated_deployment(&clarinet_toml_path, &None) {
-                    Ok(deployment) => deployment,
-                    Err(message) => return Err((message, vec![])),
-                }
-            }
-            Ok(None) => return Err(("unable to locate Clarinet.toml".into(), vec![])),
-        };
-
-        // Build a blank Session: we will be evaluating the contracts one by one
-        let mut incremental_session = Session::new(SessionSettings::default());
-        let mut collected_diagnostics = HashMap::new();
-        let mainnet = false;
-
-        // for (i, contract) in settings.initial_contracts.iter().enumerate() {
-        //     let contract_path =
-        //         PathBuf::from_str(&contract.path).expect("Expect url to be well formatted");
-        //     let contract_url =
-        //         Url::from_file_path(contract_path).expect("Expect url to be well formatted");
-        //     let contract_id = contract
-        //         .get_contract_identifier(mainnet)
-        //         .expect("Expect contract to be named");
-        //     let code = fs::read_to_string(&contract.path).expect("Expect file to be readable");
-
-        //     logs.push(format!("Analysis #{}: {}", i, contract_id.to_string()));
-
-        //     // Before doing anything, keep a clone of the session before inserting anything in the datastore.
-        //     let session = incremental_session.clone();
-
-        //     // Extract the AST, and try to move to the next contract if we throw an error:
-        //     // we're trying to get as many errors as possible
-        //     let (mut ast, mut diagnostics, _) = incremental_session.interpreter.build_ast(
-        //         contract_id.clone(),
-        //         code.clone(),
-        //         settings.repl_settings.parser_version,
-        //     );
-
-        //     // Run the analysis, and try to move to the next contract if we throw an error:
-        //     // we're trying to get as many errors as possible
-        //     let (annotations, mut annotation_diagnostics) = incremental_session
-        //         .interpreter
-        //         .collect_annotations(&ast, &code);
-        //     diagnostics.append(&mut annotation_diagnostics);
-        //     let (analysis, mut analysis_diagnostics) = match incremental_session
-        //         .interpreter
-        //         .run_analysis(contract_id.clone(), &mut ast, &annotations)
-        //     {
-        //         Ok(analysis) => analysis,
-        //         Err((_, Some(diagnostic), _)) => {
-        //             diagnostics.push(diagnostic);
-        //             collected_diagnostics.insert(
-        //                 contract_url.clone(),
-        //                 diagnostics
-        //                     .into_iter()
-        //                     .map(|d| utils::convert_clarity_diagnotic_to_lsp_diagnostic(d))
-        //                     .collect::<Vec<Diagnostic>>(),
-        //             );
-        //             continue;
-        //         }
-        //         Err((_, _, Some(error))) => {
-        //             logs.push(format!("Unable to get analysis: {:?}", error).into());
-        //             continue;
-        //         }
-        //         _ => {
-        //             logs.push("Unable to get diagnostics".into());
-        //             continue;
-        //         }
-        //     };
-        //     diagnostics.append(&mut analysis_diagnostics);
-        //     collected_diagnostics.insert(
-        //         contract_url.clone(),
-        //         diagnostics
-        //             .into_iter()
-        //             .map(|d| utils::convert_clarity_diagnotic_to_lsp_diagnostic(d))
-        //             .collect::<_>(),
-        //     );
-
-        //     // Executing the contract will also save the contract into the Datastore. This is required
-        //     // for the next contracts, that could depend on the current contract.
-        //     let _ = incremental_session.interpreter.execute(
-        //         contract_id.clone(),
-        //         &mut ast,
-        //         code.clone(),
-        //         analysis.clone(),
-        //         false,
-        //         false,
-        //         None,
-        //     );
-
-        //     // We have a legit contract, let's extract some Intellisense data that will be served for
-        //     // auto-completion requests
-        //     let intellisense = utils::build_intellisense(&analysis);
-
-        //     let contract_state = ContractState {
-        //         analysis,
-        //         session,
-        //         intellisense,
-        //     };
-
-        //     if let Ok(ref mut contracts_writer) = self.contracts.write() {
-        //         contracts_writer.insert(contract_url, contract_state);
-        //     } else {
-        //         logs.push(format!("Unable to acquire write lock"));
-        //     }
-        // }
-        return Ok((collected_diagnostics, logs));
-    }
-
-    pub fn run_single_analysis(
-        &self,
-        contract_url: Url,
-    ) -> std::result::Result<(HashMap<Url, Vec<Diagnostic>>, Logs), (String, Logs)> {
-        let mut logs = vec![];
-        let mut settings = SessionSettings::default();
-        settings.repl_settings.analysis.enable_all_passes();
-
-        let mut incremental_session = Session::new(settings.clone());
-        let mut collected_diagnostics = HashMap::new();
-
-        let contract_path = contract_url
-            .to_file_path()
-            .expect("Expect url to be well formatted");
-        let code = fs::read_to_string(&contract_path).expect("Expect file to be readable");
-
-        let contract_id = QualifiedContractIdentifier::transient();
-
-        logs.push(format!("Analysis: {}", contract_id.to_string()));
-
-        // Before doing anything, keep a clone of the session before inserting anything in the datastore.
-        let session = incremental_session.clone();
-
-        // Extract the AST, and try to move to the next contract if we throw an error:
-        // we're trying to get as many errors as possible
-        let (mut ast, mut diagnostics, _) =
-            incremental_session
-                .interpreter
-                .build_ast(contract_id.clone(), code.clone(), 2);
-
-        // Run the analysis, and try to move to the next contract if we throw an error:
-        // we're trying to get as many errors as possible
-        let (annotations, mut annotation_diagnostics) = incremental_session
-            .interpreter
-            .collect_annotations(&ast, &code);
-        diagnostics.append(&mut annotation_diagnostics);
-        let (analysis, mut analysis_diagnostics) = match incremental_session
-            .interpreter
-            .run_analysis(contract_id.clone(), &mut ast, &annotations)
-        {
-            Ok(analysis) => analysis,
-            Err((_, Some(diagnostic), _)) => {
-                diagnostics.push(diagnostic);
-                collected_diagnostics.insert(
-                    contract_url.clone(),
-                    diagnostics
-                        .into_iter()
-                        .map(|d| utils::convert_clarity_diagnotic_to_lsp_diagnostic(d))
-                        .collect::<Vec<Diagnostic>>(),
-                );
-                return Ok((collected_diagnostics, logs));
-            }
-            _ => {
-                logs.push("Unable to get diagnostic".into());
-                return Ok((collected_diagnostics, logs));
-            }
-        };
-        diagnostics.append(&mut analysis_diagnostics);
-        collected_diagnostics.insert(
-            contract_url.clone(),
-            diagnostics
-                .into_iter()
-                .map(|d| utils::convert_clarity_diagnotic_to_lsp_diagnostic(d))
-                .collect::<_>(),
-        );
-
-        // We have a legit contract, let's extract some Intellisense data that will be served for
-        // auto-completion requests
-        let intellisense = utils::build_intellisense(&analysis);
-
-        let contract_state = ContractState {
-            analysis,
-            session,
-            intellisense,
-        };
-
-        if let Ok(ref mut contracts_writer) = self.contracts.write() {
-            contracts_writer.insert(contract_url, contract_state);
-        } else {
-            logs.push(format!("Unable to acquire write lock"));
-        }
-
-        return Ok((collected_diagnostics, logs));
-    }
-
-    fn get_contracts_urls(&self) -> Vec<Url> {
-        let contracts_reader = self.contracts.read().unwrap();
-        contracts_reader.keys().map(|u| u.clone()).collect()
-    }
-
-    fn get_config_files_paths(&self) -> std::result::Result<Option<PathBuf>, String> {
-        match self.clarinet_toml_path.read() {
-            Ok(clarinet_toml_path) => match clarinet_toml_path.as_ref() {
-                Some(clarinet_toml_path) => Ok(Some(clarinet_toml_path.clone())),
-                _ => Ok(None),
-            },
-            _ => return Err("Unable to acquire locks".into()),
-        }
-    }
-
-    fn is_clarinet_workspace(&self) -> bool {
-        match self.get_config_files_paths() {
-            Ok(Some(_)) => true,
-            _ => false,
-        }
-    }
-}
-
-impl ClarityLanguageBackend {
-    async fn handle_diagnostics(
-        &self,
-        diagnostics: Option<HashMap<Url, Vec<Diagnostic>>>,
-        logs: Vec<String>,
-    ) {
-        // let (diagnostics, messages) = self.run_incremental_analysis(None);
-        for m in logs.iter() {
-            self.client.log_message(MessageType::Info, m).await;
-        }
-
-        if let Some(diagnostics) = diagnostics {
-            // Note: None != Some(vec![]): When we pass None, it means that we were unable to get some
-            // diagnostics, so don't flush the current diagnostics.
-            for url in self.get_contracts_urls().into_iter() {
-                self.client.publish_diagnostics(url, vec![], None).await;
-            }
-
-            let mut erroring_files = HashSet::new();
-            let mut warning_files = HashSet::new();
-            for (url, diagnostic) in diagnostics.into_iter() {
-                for d in diagnostic.iter() {
-                    if let Some(level) = d.severity {
-                        if level == DiagnosticSeverity::Warning {
-                            warning_files.insert(
-                                url.to_file_path()
-                                    .unwrap()
-                                    .file_name()
-                                    .unwrap()
-                                    .to_str()
-                                    .unwrap()
-                                    .to_string(),
-                            );
-                        } else if level == DiagnosticSeverity::Error {
-                            erroring_files.insert(
-                                url.to_file_path()
-                                    .unwrap()
-                                    .file_name()
-                                    .unwrap()
-                                    .to_str()
-                                    .unwrap()
-                                    .to_string(),
-                            );
-                        }
-                    }
-                }
-                self.client.publish_diagnostics(url, diagnostic, None).await;
-            }
-            let res = match (erroring_files.len(), warning_files.len()) {
-                (0, 0) => None,
-                (0, warnings) if warnings > 0 => Some((
-                    MessageType::Warning,
-                    format!(
-                        "Warning detected in following contracts: {}",
-                        warning_files.into_iter().collect::<Vec<_>>().join(", ")
-                    ),
-                )),
-                (errors, 0) if errors > 0 => Some((
-                    MessageType::Error,
-                    format!(
-                        "Errors detected in following contracts: {}",
-                        erroring_files.into_iter().collect::<Vec<_>>().join(", ")
-                    ),
-                )),
-                (_errors, _warnings) => Some((
-                    MessageType::Error,
-                    format!(
-                        "Errors and warnings detected in following contracts: {}",
-                        erroring_files.into_iter().collect::<Vec<_>>().join(", ")
-                    ),
-                )),
-            };
-            if let Some((level, message)) = res {
-                self.client.show_message(level, message).await;
-            }
+            command_tx: Arc::new(Mutex::new(command_tx)),
+            protocol_state: RwLock::new(ProtocolState::new()),
         }
     }
 }
@@ -375,52 +44,6 @@ impl ClarityLanguageBackend {
 #[async_trait]
 impl LanguageServer for ClarityLanguageBackend {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
-        let mut manifest_file = None;
-
-        // Are we looking at a workspace that would include a Clarinet project?
-        if let Some(workspace_folders) = params.workspace_folders {
-            for folder in workspace_folders.iter() {
-                let root_path = folder
-                    .uri
-                    .to_file_path()
-                    .expect("Unable to turn URL into path");
-
-                let mut clarinet_toml_path = root_path.clone();
-                clarinet_toml_path.push("Clarinet.toml");
-
-                let mut network_toml_path = root_path.clone();
-                network_toml_path.push("settings");
-                network_toml_path.push("Devnet.toml");
-
-                if clarinet_toml_path.exists() {
-                    manifest_file = Some(clarinet_toml_path);
-                    break;
-                }
-            }
-        }
-
-        match (&manifest_file, params.root_uri) {
-            (None, Some(root_uri)) => {
-                // Are we looking at a folder that would include a Clarinet project?
-                let root_path = root_uri
-                    .to_file_path()
-                    .expect("Unable to turn URL into path");
-
-                let mut clarinet_toml_path = root_path.clone();
-                clarinet_toml_path.push("Clarinet.toml");
-
-                if clarinet_toml_path.exists() {
-                    manifest_file = Some(clarinet_toml_path);
-                }
-            }
-            _ => {}
-        }
-
-        if let Some(clarinet_toml_path) = manifest_file {
-            let mut clarinet_toml_path_writer = self.clarinet_toml_path.write().unwrap();
-            *clarinet_toml_path_writer = Some(clarinet_toml_path.clone());
-        }
-
         Ok(InitializeResult {
             server_info: None,
             capabilities: ServerCapabilities {
@@ -441,22 +64,7 @@ impl LanguageServer for ClarityLanguageBackend {
         })
     }
 
-    async fn initialized(&self, _params: InitializedParams) {
-        // If we're not in a Clarinet workspace, don't try to be smart.
-        if !self.is_clarinet_workspace() {
-            return;
-        }
-
-        match self.run_full_analysis() {
-            Ok((diagnostics, logs)) => {
-                self.handle_diagnostics(Some(diagnostics), logs).await;
-            }
-            Err((message, logs)) => {
-                self.handle_diagnostics(None, logs).await;
-                self.client.log_message(MessageType::Error, message).await;
-            }
-        };
-    }
+    async fn initialized(&self, _params: InitializedParams) {}
 
     async fn shutdown(&self) -> Result<()> {
         Ok(())
@@ -467,27 +75,20 @@ impl LanguageServer for ClarityLanguageBackend {
     }
 
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
-        let mut keywords = self.native_functions.clone();
+        // We receive notifications for toml and clar files, but only want to achieve this capability
+        // for clar files.
         let contract_uri = params.text_document_position.text_document.uri;
+        if !contract_uri.to_string().ends_with(".clar") {
+            return Ok(None);
+        }
 
-        let (mut contract_keywords, mut contract_calls) = {
-            let contracts_reader = self.contracts.read().unwrap();
-            let contract_keywords = match contracts_reader.get(&contract_uri) {
-                Some(entry) => entry.intellisense.intra_contract.clone(),
-                _ => vec![],
+        let mut keywords = {
+            let protocol_state_reader = match self.protocol_state.read() {
+                Ok(protocol_state_reader) => protocol_state_reader,
+                Err(_) => return Ok(None),
             };
-            let mut contract_calls = vec![];
-            for (url, contract_state) in contracts_reader.iter() {
-                if !contract_uri.eq(url) {
-                    contract_calls.append(&mut contract_state.intellisense.inter_contract.clone());
-                }
-            }
-            (contract_keywords, contract_calls)
+            protocol_state_reader.get_completion_items_for_contract(&contract_uri)
         };
-
-        keywords.append(&mut contract_keywords);
-        keywords.append(&mut contract_calls);
-
         // Little big detail: should we wrap the inserted_text with braces?
         let should_wrap = {
             // let line = params.text_document_position.position.line;
@@ -514,34 +115,78 @@ impl LanguageServer for ClarityLanguageBackend {
                 }
             }
         }
-
         Ok(Some(CompletionResponse::from(keywords)))
     }
 
-    async fn did_open(&self, _: DidOpenTextDocumentParams) {}
+    async fn did_open(&self, params: DidOpenTextDocumentParams) {
+        let response_rx = if let Some(contract_path) = get_contract_file(&params.text_document.uri)
+        {
+            let (response_tx, response_rx) = channel();
+            let _ = match self.command_tx.lock() {
+                Ok(tx) => tx.send(LspRequest::ContractOpened(contract_path, response_tx)),
+                Err(_) => return,
+            };
+            response_rx
+        } else if let Some(manifest_path) = get_contract_file(&params.text_document.uri) {
+            let (response_tx, response_rx) = channel();
+            let _ = match self.command_tx.lock() {
+                Ok(tx) => tx.send(LspRequest::ManifestOpened(manifest_path, response_tx)),
+                Err(_) => return,
+            };
+            response_rx
+        } else {
+            return;
+        };
 
-    // async fn did_change(&self, changes: DidChangeTextDocumentParams) {
-    //     if let Some(change) = changes.content_changes.last() {
-    //         self.client.log_message(MessageType::Info, change.text.clone()).await;
-    //     }
-    // }
+        if let Ok(ref mut response) = response_rx.recv() {
+            if !response.contracts_updates.is_empty() {
+                if let Ok(ref mut protocol_state_writer) = self.protocol_state.write() {
+                    if response.state_cleared {
+                        protocol_state_writer.clear();
+                    }
+                    protocol_state_writer.ingest_contracts_updates(&mut response.contracts_updates);
+                }
+                self.publish_diagnostics(vec![], None);
+            }
+        }
+        // self.publish_diagnostics(vec![], None).await;
+        // self.client.publish_diagnostics(params.text_document.uri, vec![], None).await;
+    }
 
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
-        let results = match self.is_clarinet_workspace() {
-            true => self.run_full_analysis(),
-            false => self.run_single_analysis(params.text_document.uri),
+        let response_rx = if let Some(contract_path) = get_contract_file(&params.text_document.uri)
+        {
+            let (response_tx, response_rx) = channel();
+            let _ = match self.command_tx.lock() {
+                Ok(tx) => tx.send(LspRequest::ContractChanged(contract_path, response_tx)),
+                Err(_) => return,
+            };
+            response_rx
+        } else if let Some(manifest_path) = get_contract_file(&params.text_document.uri) {
+            let (response_tx, response_rx) = channel();
+            let _ = match self.command_tx.lock() {
+                Ok(tx) => tx.send(LspRequest::ManifestChanged(manifest_path, response_tx)),
+                Err(_) => return,
+            };
+            response_rx
+        } else {
+            return;
         };
 
-        match results {
-            Ok((diagnostics, logs)) => {
-                self.handle_diagnostics(Some(diagnostics), logs).await;
+        if let Ok(ref mut response) = response_rx.recv() {
+            if !response.contracts_updates.is_empty() {
+                if let Ok(ref mut protocol_state_writer) = self.protocol_state.write() {
+                    if response.state_cleared {
+                        protocol_state_writer.clear();
+                    }
+                    protocol_state_writer.ingest_contracts_updates(&mut response.contracts_updates);
+                }
+                self.publish_diagnostics(vec![], None);
             }
-            Err((message, logs)) => {
-                self.handle_diagnostics(None, logs).await;
-                self.client.log_message(MessageType::Error, message).await;
-            }
-        };
+        }
     }
+
+    async fn did_change(&self, changes: DidChangeTextDocumentParams) {}
 
     async fn did_close(&self, _: DidCloseTextDocumentParams) {}
 
@@ -573,4 +218,129 @@ impl LanguageServer for ClarityLanguageBackend {
     // fn document_highlight(&self, _: TextDocumentPositionParams) -> Self::HighlightFuture {
     //     Box::new(future::ok(None))
     // }
+}
+
+fn get_manifest_file(text_document_uri: &Url) -> Option<PathBuf> {
+    match text_document_uri.to_file_path() {
+        Ok(path) if path.ends_with("Clarinet.toml") => Some(path),
+        _ => None,
+    }
+}
+
+fn get_contract_file(text_document_uri: &Url) -> Option<PathBuf> {
+    match text_document_uri.to_file_path() {
+        Ok(path) if path.ends_with(".clar") => Some(path),
+        _ => None,
+    }
+}
+
+fn get_file_name(uri: &Url) -> Option<String> {
+    uri.to_file_path()
+        .ok()
+        .as_ref()
+        .and_then(|f| f.file_name())
+        .and_then(|f| f.to_str())
+        .and_then(|f| Some(f.to_string()))
+}
+
+impl ClarityLanguageBackend {
+    async fn reset_diagnostics(&self, file: &Option<Url>) -> bool {
+        let protocol_state_reader = match self.protocol_state.read() {
+            Ok(protocol_state_reader) => protocol_state_reader,
+            _ => return false,
+        };
+        if let Some(file) = file {
+            self.client
+                .publish_diagnostics(file.clone(), vec![], None)
+                .await;
+        } else {
+            for (contract_url, _) in protocol_state_reader.contracts.iter() {
+                self.client
+                    .publish_diagnostics(contract_url.clone(), vec![], None)
+                    .await;
+            }
+        }
+        true
+    }
+
+    async fn publish_diagnostics(&self, logs: Vec<String>, file: Option<Url>) -> bool {
+        for m in logs.iter() {
+            self.client.log_message(MessageType::Info, m).await;
+        }
+
+        self.reset_diagnostics(&file);
+
+        let protocol_state_reader = match self.protocol_state.read() {
+            Ok(protocol_state_reader) => protocol_state_reader,
+            _ => return false,
+        };
+        if let Some(ref file) = file {
+        } else {
+            let mut erroring_files = HashSet::new();
+            let mut warning_files = HashSet::new();
+
+            for (contract_url, state) in protocol_state_reader.contracts.iter() {
+                let mut diags = vec![];
+
+                // Convert and collect errors
+                if !state.errors.is_empty() {
+                    if let Some(file_name) = get_file_name(contract_url) {
+                        erroring_files.insert(file_name);
+                    }
+                    for error in state.errors.iter() {
+                        diags.push(error.clone());
+                    }
+                }
+
+                // Convert and collect warnings
+                if !state.warnings.is_empty() {
+                    if let Some(file_name) = get_file_name(contract_url) {
+                        warning_files.insert(file_name);
+                    }
+                    for warning in state.errors.iter() {
+                        diags.push(warning.clone());
+                    }
+                }
+
+                // Convert and collect notes
+                for note in state.notes.iter() {
+                    diags.push(note.clone());
+                }
+
+                // Publish collected diagnostics
+                self.client
+                    .publish_diagnostics(contract_url.clone(), diags, None)
+                    .await;
+            }
+
+            let res = match (erroring_files.len(), warning_files.len()) {
+                (0, 0) => None,
+                (0, warnings) if warnings > 0 => Some((
+                    MessageType::Warning,
+                    format!(
+                        "Warning detected in following contracts: {}",
+                        warning_files.into_iter().collect::<Vec<_>>().join(", ")
+                    ),
+                )),
+                (errors, 0) if errors > 0 => Some((
+                    MessageType::Error,
+                    format!(
+                        "Errors detected in following contracts: {}",
+                        erroring_files.into_iter().collect::<Vec<_>>().join(", ")
+                    ),
+                )),
+                (_errors, _warnings) => Some((
+                    MessageType::Error,
+                    format!(
+                        "Errors and warnings detected in following contracts: {}",
+                        erroring_files.into_iter().collect::<Vec<_>>().join(", ")
+                    ),
+                )),
+            };
+            if let Some((level, message)) = res {
+                self.client.show_message(level, message).await;
+            }
+        }
+        true
+    }
 }

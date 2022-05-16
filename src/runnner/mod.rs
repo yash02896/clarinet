@@ -7,11 +7,11 @@
 #![allow(unused_must_use)]
 
 use crate::deployment::{
-    apply_on_chain_deployment, check_deployments, create_default_test_deployment,
-    display_deployment, generate_default_deployment, get_absolute_deployment_path,
-    get_default_deployment_path, initiate_session_from_deployment, load_deployment,
-    read_or_default_to_generated_deployment, setup_session_with_deployment,
-    update_session_with_contracts, update_session_with_genesis_accounts, write_deployment,
+    apply_on_chain_deployment, check_deployments, display_deployment, generate_default_deployment,
+    get_absolute_deployment_path, get_default_deployment_path, initiate_session_from_deployment,
+    load_deployment, read_or_default_to_generated_deployment, setup_session_with_deployment,
+    update_session_with_contracts_executions, update_session_with_genesis_accounts,
+    write_deployment,
 };
 use clarity_repl::clarity::analysis::contract_interface_builder::{
     build_contract_interface, ContractInterface,
@@ -48,7 +48,10 @@ impl DeploymentCache {
         let mut session_accounts_only = initiate_session_from_deployment(&manifest_path);
         update_session_with_genesis_accounts(&mut session_accounts_only, &deployment);
         let mut session = session_accounts_only.clone();
-        let execution_results = update_session_with_contracts(&mut session, &deployment);
+
+        // TODO(lgalabru): Possible optimization by reusing ASTs, if knowns
+        let execution_results =
+            update_session_with_contracts_executions(&mut session, &deployment, &None);
 
         let mut contracts_artifacts = HashMap::new();
         for (contract_id, execution_result) in execution_results.into_iter() {

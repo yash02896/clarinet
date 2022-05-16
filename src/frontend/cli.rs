@@ -1,8 +1,8 @@
 use crate::deployment::{
-    apply_on_chain_deployment, check_deployments, create_default_test_deployment,
-    display_deployment, generate_default_deployment, get_absolute_deployment_path,
-    get_default_deployment_path, load_deployment, load_deployment_if_exists,
-    read_or_default_to_generated_deployment, setup_session_with_deployment, write_deployment,
+    apply_on_chain_deployment, check_deployments, display_deployment, generate_default_deployment,
+    get_absolute_deployment_path, get_default_deployment_path, load_deployment,
+    load_deployment_if_exists, read_or_default_to_generated_deployment,
+    setup_session_with_deployment, write_deployment,
 };
 use crate::generate::{
     self,
@@ -428,7 +428,7 @@ pub fn main() {
                 };
 
                 let default_deployment_path = get_default_deployment_path(&manifest_path, &network);
-                let deployment = match generate_default_deployment(&manifest_path, &network) {
+                let (deployment, _) = match generate_default_deployment(&manifest_path, &network) {
                     Ok(deployment) => deployment,
                     Err(message) => {
                         println!("{}", red!(message));
@@ -576,12 +576,34 @@ pub fn main() {
         },
         Command::Console(cmd) => {
             let manifest_path = get_manifest_path_or_exit(cmd.manifest_path);
-            let res = match cmd.deployment_plan_path {
-                None => generate_default_deployment(&manifest_path, &None),
-                Some(path) => load_deployment(
-                    &manifest_path,
-                    &get_absolute_deployment_path(&manifest_path, &path),
-                ),
+
+            let (res, deployment_path) = match cmd.deployment_plan_path {
+                None => {
+                    let res = load_deployment_if_exists(&manifest_path, &None);
+                    match res {
+                        Some(Ok(deployment)) => {
+                            println!("{}: using deployments/Test.yaml", yellow!("note"));
+                            (Ok(deployment), None)
+                        }
+                        Some(Err(e)) => {
+                            println!(
+                                "{}: loading deployments/Test.yaml failed with error: {}",
+                                red!("error"),
+                                e
+                            );
+                            std::process::exit(1);
+                        }
+                        None => match generate_default_deployment(&manifest_path, &None) {
+                            Ok((deployment, _)) => (Ok(deployment), None),
+                            Err(e) => (Err(e), None),
+                        },
+                    }
+                }
+                Some(path) => {
+                    let deployment_path = get_absolute_deployment_path(&manifest_path, &path);
+                    let deployment = load_deployment(&manifest_path, &deployment_path);
+                    (deployment, Some(format!("{}", deployment_path.display())))
+                }
             };
 
             let deployment = match res {
@@ -592,7 +614,8 @@ pub fn main() {
                 }
             };
 
-            let (session, _) = setup_session_with_deployment(&manifest_path, &deployment);
+            // TODO(lgalabru): Possible optimization by reusing ASTs, if known
+            let (session, _) = setup_session_with_deployment(&manifest_path, &deployment, &None);
             let mut terminal = Terminal::load(session);
             terminal.start();
 
@@ -683,12 +706,33 @@ pub fn main() {
         Command::Check(cmd) => {
             let manifest_path = get_manifest_path_or_exit(cmd.manifest_path);
 
-            let res = match cmd.deployment_plan_path {
-                None => generate_default_deployment(&manifest_path, &None),
-                Some(path) => load_deployment(
-                    &manifest_path,
-                    &get_absolute_deployment_path(&manifest_path, &path),
-                ),
+            let (res, deployment_path) = match cmd.deployment_plan_path {
+                None => {
+                    let res = load_deployment_if_exists(&manifest_path, &None);
+                    match res {
+                        Some(Ok(deployment)) => {
+                            println!("{}: using deployments/Test.yaml", yellow!("note"));
+                            (Ok(deployment), None)
+                        }
+                        Some(Err(e)) => {
+                            println!(
+                                "{}: loading deployments/Test.yaml failed with error: {}",
+                                red!("error"),
+                                e
+                            );
+                            std::process::exit(1);
+                        }
+                        None => match generate_default_deployment(&manifest_path, &None) {
+                            Ok((deployment, _)) => (Ok(deployment), None),
+                            Err(e) => (Err(e), None),
+                        },
+                    }
+                }
+                Some(path) => {
+                    let deployment_path = get_absolute_deployment_path(&manifest_path, &path);
+                    let deployment = load_deployment(&manifest_path, &deployment_path);
+                    (deployment, Some(format!("{}", deployment_path.display())))
+                }
             };
 
             let deployment = match res {
@@ -699,7 +743,8 @@ pub fn main() {
                 }
             };
 
-            let (_, results) = setup_session_with_deployment(&manifest_path, &deployment);
+            // TODO(lgalabru): Possible optimization by reusing ASTs, if knowns
+            let (_, results) = setup_session_with_deployment(&manifest_path, &deployment, &None);
             let mut success = 0;
             let mut warnings = 0;
             let mut errors = 0;
@@ -871,7 +916,10 @@ pub fn main() {
                             );
                             std::process::exit(1);
                         }
-                        None => (generate_default_deployment(&manifest_path, &None), None),
+                        None => match generate_default_deployment(&manifest_path, &None) {
+                            Ok((deployment, _)) => (Ok(deployment), None),
+                            Err(e) => (Err(e), None),
+                        },
                     }
                 }
                 Some(path) => {
@@ -927,8 +975,25 @@ pub fn main() {
 
             let (res, deployment_path) = match cmd.deployment_plan_path {
                 None => {
-                    let deployment = generate_default_deployment(&manifest_path, &None);
-                    (deployment, None)
+                    let res = load_deployment_if_exists(&manifest_path, &None);
+                    match res {
+                        Some(Ok(deployment)) => {
+                            println!("{}: using deployments/Test.yaml", yellow!("note"));
+                            (Ok(deployment), None)
+                        }
+                        Some(Err(e)) => {
+                            println!(
+                                "{}: loading deployments/Test.yaml failed with error: {}",
+                                red!("error"),
+                                e
+                            );
+                            std::process::exit(1);
+                        }
+                        None => match generate_default_deployment(&manifest_path, &None) {
+                            Ok((deployment, _)) => (Ok(deployment), None),
+                            Err(e) => (Err(e), None),
+                        },
+                    }
                 }
                 Some(path) => {
                     let deployment_path = get_absolute_deployment_path(&manifest_path, &path);

@@ -89,7 +89,8 @@ impl StacksEventObserverConfig {
             }
         };
 
-        let (session, _) = setup_session_with_deployment(&manifest_path, &deployment);
+        // TODO(lgalabru): Possible optimization by reusing ASTs, if known
+        let (session, _) = setup_session_with_deployment(&manifest_path, &deployment, &None);
 
         let chain_config = ChainConfig::from_manifest_path(&manifest_path, &network);
 
