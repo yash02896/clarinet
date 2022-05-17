@@ -1,3 +1,4 @@
+use super::CompletionMaps;
 use clarity_repl::clarity::analysis::ContractAnalysis;
 use clarity_repl::clarity::diagnostic::{Diagnostic as ClarityDiagnostic, Level as ClarityLevel};
 use clarity_repl::clarity::docs::{
@@ -7,10 +8,9 @@ use clarity_repl::clarity::functions::define::DefineFunctions;
 use clarity_repl::clarity::functions::NativeFunctions;
 use clarity_repl::clarity::types::{BlockInfoProperty, FunctionType};
 use clarity_repl::clarity::variables::NativeVariables;
+use std::path::PathBuf;
 use tower_lsp::lsp_types::Diagnostic as LspDiagnostic;
 use tower_lsp::lsp_types::*;
-
-use super::CompletionMaps;
 
 pub fn convert_clarity_diagnotic_to_lsp_diagnostic(
     diagnostic: &ClarityDiagnostic,
@@ -342,4 +342,49 @@ pub fn build_default_native_keywords_list() -> Vec<CompletionItem> {
     .flatten()
     .collect::<Vec<CompletionItem>>();
     items
+}
+
+pub fn get_manifest_path_from_contract_url(contract_url: &Url) -> Option<PathBuf> {
+    let mut manifest_path = get_contract_file(contract_url)?;
+    let mut manifest_found = false;
+
+    while manifest_path.pop() {
+        manifest_path.push("Clarinet.toml");
+        if manifest_path.exists() {
+            manifest_found = true;
+            break;
+        }
+        manifest_path.pop();
+    }
+
+    match manifest_found {
+        true => Some(manifest_path),
+        false => None,
+    }
+}
+
+pub fn get_manifest_file(text_document_uri: &Url) -> Option<PathBuf> {
+    match text_document_uri.to_file_path() {
+        Ok(path) if path.ends_with("Clarinet.toml") => Some(path),
+        _ => None,
+    }
+}
+
+pub fn get_contract_file(text_document_uri: &Url) -> Option<PathBuf> {
+    match text_document_uri.to_file_path() {
+        Ok(path) => match path.extension() {
+            Some(ext) if ext.to_str() == Some("clar") => Some(path),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+pub fn get_file_name(uri: &Url) -> Option<String> {
+    uri.to_file_path()
+        .ok()
+        .as_ref()
+        .and_then(|f| f.file_name())
+        .and_then(|f| f.to_str())
+        .and_then(|f| Some(f.to_string()))
 }

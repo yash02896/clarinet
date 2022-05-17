@@ -128,16 +128,143 @@ impl ContractState {
 }
 
 #[derive(Clone, Default, Debug)]
+pub struct EditorState {
+    protocols: HashMap<PathBuf, ProtocolState>,
+    contracts_lookup: HashMap<Url, PathBuf>,
+    native_functions: Vec<CompletionItem>,
+}
+
+impl EditorState {
+    pub fn new() -> EditorState {
+        EditorState {
+            protocols: HashMap::new(),
+            contracts_lookup: HashMap::new(),
+            native_functions: utils::build_default_native_keywords_list(),
+        }
+    }
+
+    pub fn index_protocol(&mut self, manifest_path: PathBuf, protocol: ProtocolState) {
+        for (contract_uri, protocol_state) in protocol.contracts.iter() {
+            self.contracts_lookup
+                .insert(contract_uri.clone(), manifest_path.clone());
+        }
+        self.protocols.insert(manifest_path, protocol);
+    }
+
+    pub fn clear_protocol(&mut self, manifest_path: &PathBuf) {
+        if let Some(protocol) = self.protocols.remove(manifest_path) {
+            for (contract_uri, _) in protocol.contracts.iter() {
+                self.contracts_lookup.remove(contract_uri);
+            }
+        }
+    }
+
+    pub fn clear_protocol_associated_with_contract(
+        &mut self,
+        contract_url: &Url,
+    ) -> Option<PathBuf> {
+        match self.contracts_lookup.get(&contract_url) {
+            Some(manifest_path) => {
+                let manifest_path = manifest_path.clone();
+                self.clear_protocol(&manifest_path);
+                Some(manifest_path)
+            }
+            None => None,
+        }
+    }
+
+    pub fn get_completion_items_for_contract(&self, contract_url: &Url) -> Vec<CompletionItem> {
+        let mut keywords = self.native_functions.clone();
+
+        let mut user_defined_keywords = self
+            .contracts_lookup
+            .get(&contract_url)
+            .and_then(|p| self.protocols.get(p))
+            .and_then(|p| Some(p.get_completion_items_for_contract(contract_url)))
+            .unwrap_or_default();
+
+        keywords.append(&mut user_defined_keywords);
+        keywords
+    }
+
+    pub fn get_aggregated_diagnostics(
+        &self,
+    ) -> (Vec<(Url, Vec<Diagnostic>)>, Option<(MessageType, String)>) {
+        let mut contracts = vec![];
+        let mut erroring_files = HashSet::new();
+        let mut warning_files = HashSet::new();
+        let mut tldr = None;
+
+        for (_, protocol_state) in self.protocols.iter() {
+            for (contract_url, state) in protocol_state.contracts.iter() {
+                let mut diags = vec![];
+
+                // Convert and collect errors
+                if !state.errors.is_empty() {
+                    if let Some(file_name) = state.path.file_name().and_then(|f| f.to_str()) {
+                        erroring_files.insert(file_name);
+                    }
+                    for error in state.errors.iter() {
+                        diags.push(error.clone());
+                    }
+                }
+
+                // Convert and collect warnings
+                if !state.warnings.is_empty() {
+                    if let Some(file_name) = state.path.file_name().and_then(|f| f.to_str()) {
+                        warning_files.insert(file_name);
+                    }
+                    for warning in state.warnings.iter() {
+                        diags.push(warning.clone());
+                    }
+                }
+
+                // Convert and collect notes
+                for note in state.notes.iter() {
+                    diags.push(note.clone());
+                }
+                contracts.push((contract_url.clone(), diags));
+            }
+        }
+
+        tldr = match (erroring_files.len(), warning_files.len()) {
+            (0, 0) => None,
+            (0, warnings) if warnings > 0 => Some((
+                MessageType::Warning,
+                format!(
+                    "Warning detected in following contracts: {}",
+                    warning_files.into_iter().collect::<Vec<_>>().join(", ")
+                ),
+            )),
+            (errors, 0) if errors > 0 => Some((
+                MessageType::Error,
+                format!(
+                    "Errors detected in following contracts: {}",
+                    erroring_files.into_iter().collect::<Vec<_>>().join(", ")
+                ),
+            )),
+            (_errors, _warnings) => Some((
+                MessageType::Error,
+                format!(
+                    "Errors and warnings detected in following contracts: {}",
+                    erroring_files.into_iter().collect::<Vec<_>>().join(", ")
+                ),
+            )),
+        };
+
+        (contracts, tldr)
+    }
+}
+
+#[derive(Clone, Default, Debug)]
 pub struct ProtocolState {
     contracts: HashMap<Url, ContractState>,
-    native_functions: Vec<CompletionItem>,
 }
 
 impl ProtocolState {
     pub fn new() -> ProtocolState {
         ProtocolState {
             contracts: HashMap::new(),
-            native_functions: utils::build_default_native_keywords_list(),
         }
     }
 
@@ -152,8 +279,7 @@ impl ProtocolState {
         deps: &mut BTreeMap<QualifiedContractIdentifier, DependencySet>,
         diags: &mut BTreeMap<QualifiedContractIdentifier, Vec<ClarityDiagnostic>>,
         analyses: &mut BTreeMap<QualifiedContractIdentifier, Option<ContractAnalysis>>,
-    ) -> Vec<(Url, ContractState)> {
-        let mut changes = vec![];
+    ) {
         // Remove old paths
         // TODO(lgalabru)
 
@@ -178,21 +304,12 @@ impl ProtocolState {
 
             let contract_state =
                 ContractState::new(contract_id, ast, deps, diags, analysis, path.clone());
-            self.contracts.insert(url.clone(), contract_state.clone());
-            changes.push((url.clone(), contract_state));
-        }
-
-        changes
-    }
-
-    pub fn ingest_contracts_updates(&mut self, contracts_updates: &mut Vec<(Url, ContractState)>) {
-        for (url, contract_state) in contracts_updates.drain(..) {
-            self.contracts.insert(url, contract_state);
+            self.contracts.insert(url.clone(), contract_state);
         }
     }
 
     pub fn get_completion_items_for_contract(&self, contract_uri: &Url) -> Vec<CompletionItem> {
-        let mut keywords = self.native_functions.clone();
+        let mut keywords = vec![];
 
         let (mut contract_keywords, mut contract_calls) = {
             let contract_keywords = match self.contracts.get(&contract_uri) {
@@ -282,32 +399,31 @@ impl ProtocolState {
 pub enum LspRequest {
     ManifestOpened(PathBuf, Sender<Response>),
     ManifestChanged(PathBuf, Sender<Response>),
-    ContractOpened(PathBuf, Sender<Response>),
-    ContractChanged(PathBuf, Sender<Response>),
+    ContractOpened(Url, Sender<Response>),
+    ContractChanged(Url, Sender<Response>),
+    GetIntellisense(Url, Sender<Response>),
 }
 
 #[derive(Default, Debug, PartialEq)]
 pub struct Response {
-    error: Option<String>,
-    contracts_updates: Vec<(Url, ContractState)>,
-    state_cleared: bool,
+    aggregated_diagnostics: Vec<(Url, Vec<Diagnostic>)>,
+    notification: Option<(MessageType, String)>,
+    completion_items: Vec<CompletionItem>,
 }
 
 impl Response {
     pub fn error(message: &str) -> Response {
         Response {
-            error: Some(format!("{}", message)),
-            contracts_updates: vec![],
-            state_cleared: false,
+            aggregated_diagnostics: vec![],
+            completion_items: vec![],
+            notification: Some((MessageType::Error, format!("Internal error: {}", message))),
         }
     }
 }
 
 fn start_server(command_rx: Receiver<LspRequest>) {
-    let mut initialized = false;
-    let mut manifest_path = PathBuf::new();
     let mut manifest_checksum = String::new();
-    let mut protocol_state = ProtocolState::new();
+    let mut editor_state = EditorState::new();
 
     loop {
         let command = match command_rx.recv() {
@@ -317,29 +433,63 @@ fn start_server(command_rx: Receiver<LspRequest>) {
             }
         };
         match command {
+            LspRequest::GetIntellisense(contract_url, response_tx) => {
+                let mut completion_items =
+                    editor_state.get_completion_items_for_contract(&contract_url);
+
+                // Little big detail: should we wrap the inserted_text with braces?
+                let should_wrap = {
+                    // let line = params.text_document_position.position.line;
+                    // let char = params.text_document_position.position.character;
+                    // let doc = params.text_document_position.text_document.uri;
+                    //
+                    // TODO(lgalabru): from there, we'd need to get the prior char
+                    // and see if a parenthesis was opened. If not, we need to wrap.
+                    // The LSP would need to update its local document cache, via
+                    // the did_change method.
+                    true
+                };
+                if should_wrap {
+                    for item in completion_items.iter_mut() {
+                        match item.kind {
+                            Some(CompletionItemKind::Event)
+                            | Some(CompletionItemKind::Function)
+                            | Some(CompletionItemKind::Module)
+                            | Some(CompletionItemKind::Class)
+                            | Some(CompletionItemKind::Method) => {
+                                item.insert_text =
+                                    Some(format!("({})", item.insert_text.take().unwrap()));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+
+                let _ = response_tx.send(Response {
+                    aggregated_diagnostics: vec![],
+                    notification: None,
+                    completion_items,
+                });
+            }
             LspRequest::ManifestOpened(opened_manifest_path, response_tx) => {
                 // The only reason why we're waiting for this kind of events, is building our initial state
                 // if the system is initialized, move on.
-                if initialized {
+                if editor_state.protocols.contains_key(&opened_manifest_path) {
                     let _ = response_tx.send(Response::default());
                     continue;
-                }
-
-                if opened_manifest_path == manifest_path {
-                    let _ = response_tx.send(Response::default());
-                    continue;
-                } else {
-                    manifest_path = opened_manifest_path;
                 }
 
                 // With this manifest_path, let's initialize our state.
-                match build_state(&manifest_path, &mut protocol_state) {
-                    Ok(contracts_updates) => {
-                        initialized = true;
+                let mut protocol_state = ProtocolState::new();
+                match build_state(&opened_manifest_path, &mut protocol_state) {
+                    Ok(_) => {
+                        editor_state.index_protocol(opened_manifest_path, protocol_state);
+                        let (aggregated_diagnostics, notification) =
+                            editor_state.get_aggregated_diagnostics();
                         let _ = response_tx.send(Response {
-                            error: None,
-                            contracts_updates,
-                            state_cleared: true,
+                            aggregated_diagnostics,
+                            notification,
+                            completion_items: vec![],
                         });
                     }
                     Err(e) => {
@@ -347,38 +497,34 @@ fn start_server(command_rx: Receiver<LspRequest>) {
                     }
                 };
             }
-            LspRequest::ContractOpened(contract_path, response_tx) => {
+            LspRequest::ContractOpened(contract_url, response_tx) => {
                 // The only reason why we're waiting for this kind of events, is building our initial state
                 // if the system is initialized, move on.
-                if initialized {
+                let manifest_path = match utils::get_manifest_path_from_contract_url(&contract_url)
+                {
+                    Some(manifest_path) => manifest_path,
+                    None => {
+                        let _ = response_tx.send(Response::default());
+                        continue;
+                    }
+                };
+
+                if editor_state.protocols.contains_key(&manifest_path) {
                     let _ = response_tx.send(Response::default());
                     continue;
                 }
 
-                let mut parent = contract_path.clone();
-                let mut manifest_found = false;
-
-                while parent.pop() {
-                    parent.push("Clarinet.toml");
-                    if parent.exists() {
-                        manifest_found = true;
-                        break;
-                    }
-                    parent.pop();
-                }
-
-                if manifest_found {
-                    manifest_path = parent;
-                }
-
                 // With this manifest_path, let's initialize our state.
+                let mut protocol_state = ProtocolState::new();
                 match build_state(&manifest_path, &mut protocol_state) {
                     Ok(contracts_updates) => {
-                        initialized = true;
+                        editor_state.index_protocol(manifest_path, protocol_state);
+                        let (aggregated_diagnostics, notification) =
+                            editor_state.get_aggregated_diagnostics();
                         let _ = response_tx.send(Response {
-                            error: None,
-                            contracts_updates,
-                            state_cleared: true,
+                            aggregated_diagnostics,
+                            notification,
+                            completion_items: vec![],
                         });
                     }
                     Err(e) => {
@@ -386,14 +532,20 @@ fn start_server(command_rx: Receiver<LspRequest>) {
                     }
                 };
             }
-            LspRequest::ManifestChanged(file_path, response_tx) => {
+            LspRequest::ManifestChanged(manifest_path, response_tx) => {
+                editor_state.clear_protocol(&manifest_path);
+
                 // We will rebuild the entire state, without to try any optimizations for now
+                let mut protocol_state = ProtocolState::new();
                 match build_state(&manifest_path, &mut protocol_state) {
                     Ok(contracts_updates) => {
+                        editor_state.index_protocol(manifest_path, protocol_state);
+                        let (aggregated_diagnostics, notification) =
+                            editor_state.get_aggregated_diagnostics();
                         let _ = response_tx.send(Response {
-                            error: None,
-                            contracts_updates,
-                            state_cleared: true,
+                            aggregated_diagnostics,
+                            notification,
+                            completion_items: vec![],
                         });
                     }
                     Err(e) => {
@@ -401,15 +553,31 @@ fn start_server(command_rx: Receiver<LspRequest>) {
                     }
                 };
             }
-            LspRequest::ContractChanged(file_path, response_tx) => {
-                // Let's try to be smart, and only trigger a full rebuild if and only if
-                // the DependencySet changed.
+            LspRequest::ContractChanged(contract_url, response_tx) => {
+                let manifest_path =
+                    match editor_state.clear_protocol_associated_with_contract(&contract_url) {
+                        Some(manifest_path) => manifest_path,
+                        None => match utils::get_manifest_path_from_contract_url(&contract_url) {
+                            Some(manifest_path) => manifest_path,
+                            None => {
+                                let _ = response_tx.send(Response::default());
+                                continue;
+                            }
+                        },
+                    };
+                // TODO(lgalabru): introduce partial analysis
+
+                // We will rebuild the entire state, without to try any optimizations for now
+                let mut protocol_state = ProtocolState::new();
                 match build_state(&manifest_path, &mut protocol_state) {
                     Ok(contracts_updates) => {
+                        editor_state.index_protocol(manifest_path, protocol_state);
+                        let (aggregated_diagnostics, notification) =
+                            editor_state.get_aggregated_diagnostics();
                         let _ = response_tx.send(Response {
-                            error: None,
-                            contracts_updates,
-                            state_cleared: true,
+                            aggregated_diagnostics,
+                            notification,
+                            completion_items: vec![],
                         });
                     }
                     Err(e) => {
@@ -428,7 +596,7 @@ pub fn reset_state(protocol_state: &mut ProtocolState) {
 pub fn build_state(
     manifest_path: &PathBuf,
     protocol_state: &mut ProtocolState,
-) -> Result<Vec<(Url, ContractState)>, String> {
+) -> Result<(), String> {
     let mut asts = BTreeMap::new();
     let mut deps = BTreeMap::new();
     let mut diags = BTreeMap::new();
@@ -471,9 +639,8 @@ pub fn build_state(
         analyses.insert(contract_id.clone(), contract_analysis);
     }
 
-    let contracts_updates =
-        protocol_state.consolidate(&mut paths, &mut asts, &mut deps, &mut diags, &mut analyses);
-    Ok(contracts_updates)
+    protocol_state.consolidate(&mut paths, &mut asts, &mut deps, &mut diags, &mut analyses);
+    Ok(())
 }
 
 #[test]
@@ -490,26 +657,22 @@ fn test_opening_contract_should_return_fresh_analysis() {
     counter_path.push("counter");
     counter_path.push("contracts");
     counter_path.push("counter.clar");
+    let counter_url = Url::from_file_path(counter_path).unwrap();
 
     let (response_tx, response_rx) = channel();
-
     let _ = tx.send(LspRequest::ContractOpened(
-        counter_path.clone(),
+        counter_url.clone(),
         response_tx.clone(),
     ));
     let response = response_rx.recv().expect("Unable to get response");
 
-    // we should get 1 contract update
-    assert_eq!(response.state_cleared, true);
-    assert_eq!(response.contracts_updates.len(), 1);
-
-    let (_url, state) = &response.contracts_updates[0];
-
-    // the counter project should emit 2 warnings, coming from the check-checker
-    assert_eq!(state.warnings.len(), 2);
+    // the counter project should emit 2 warnings and 2 notes coming from counter.clar
+    assert_eq!(response.aggregated_diagnostics.len(), 1);
+    let (url, diags) = &response.aggregated_diagnostics[0];
+    assert_eq!(diags.len(), 4);
 
     // re-opening this contract should not trigger a full analysis
-    let _ = tx.send(LspRequest::ContractOpened(counter_path, response_tx));
+    let _ = tx.send(LspRequest::ContractOpened(counter_url, response_tx));
     let response = response_rx.recv().expect("Unable to get response");
     assert_eq!(response, Response::default());
 }
@@ -535,14 +698,10 @@ fn test_opening_manifest_should_return_fresh_analysis() {
     ));
     let response = response_rx.recv().expect("Unable to get response");
 
-    // we should get 1 contract update
-    assert_eq!(response.state_cleared, true);
-    assert_eq!(response.contracts_updates.len(), 1);
-
-    let (_url, state) = &response.contracts_updates[0];
-
-    // the counter project should emit 2 warnings, coming from the check-checker
-    assert_eq!(state.warnings.len(), 2);
+    // the counter project should emit 2 warnings and 2 notes coming from counter.clar
+    assert_eq!(response.aggregated_diagnostics.len(), 1);
+    let (url, diags) = &response.aggregated_diagnostics[0];
+    assert_eq!(diags.len(), 4);
 
     // re-opening this manifest should not trigger a full analysis
     let _ = tx.send(LspRequest::ManifestOpened(manifest_path, response_tx));
