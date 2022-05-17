@@ -39,7 +39,7 @@ impl ClarityLanguageBackend {
 
 #[async_trait]
 impl LanguageServer for ClarityLanguageBackend {
-    async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
+    async fn initialize(&self, _params: InitializeParams) -> Result<InitializeResult> {
         Ok(InitializeResult {
             server_info: None,
             capabilities: ServerCapabilities {

@@ -3,9 +3,9 @@ pub mod types;
 mod ui;
 
 use self::types::{
-    ContractCallSpecificationFile, DeploymentSpecification, EmulatedContractPublishSpecification,
-    GenesisSpecification, TransactionPlanSpecification, TransactionPlanSpecificationFile,
-    TransactionsBatchSpecification, WalletSpecification,
+    DeploymentSpecification, EmulatedContractPublishSpecification, GenesisSpecification,
+    TransactionPlanSpecification, TransactionPlanSpecificationFile, TransactionsBatchSpecification,
+    WalletSpecification,
 };
 use crate::deployment::types::ContractPublishSpecification;
 use crate::deployment::types::{
@@ -35,6 +35,7 @@ use clarity_repl::clarity::types::{
 use clarity_repl::clarity::util::{
     C32_ADDRESS_VERSION_MAINNET_SINGLESIG, C32_ADDRESS_VERSION_TESTNET_SINGLESIG,
 };
+use clarity_repl::clarity::ContractName;
 use clarity_repl::clarity::{
     codec::{
         transaction::{
@@ -48,8 +49,6 @@ use clarity_repl::clarity::{
         StacksAddress,
     },
 };
-use clarity_repl::clarity::{ClarityName, ContractName};
-use clarity_repl::repl::settings::{Account, InitialContract};
 use clarity_repl::repl::SessionSettings;
 use clarity_repl::repl::{ExecutionResult, Session};
 use libsecp256k1::{PublicKey, SecretKey};
@@ -303,7 +302,7 @@ pub fn update_session_with_contracts_analyses(
                         diagnostics.append(&mut annotation_diagnostics);
                         let mut ast = ast.clone();
 
-                        let (analysis, mut analysis_diagnostics) = match session
+                        let (mut analysis, mut analysis_diagnostics) = match session
                             .interpreter
                             .run_analysis(contract_id.clone(), &mut ast, &annotations)
                         {
@@ -318,6 +317,13 @@ pub fn update_session_with_contracts_analyses(
                             }
                         };
                         diagnostics.append(&mut analysis_diagnostics);
+                        session.interpreter.save_contract(
+                            contract_id.clone(),
+                            &mut ast,
+                            tx.source.clone(),
+                            analysis.clone(),
+                            false,
+                        );
                         results.insert(contract_id, Ok((analysis, diagnostics)));
                     }
 

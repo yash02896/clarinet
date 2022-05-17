@@ -155,7 +155,6 @@ pub async fn start_chains_coordinator(
     };
 
     let port = config.devnet_config.orchestrator_port;
-    let manifest_path = config.manifest_path.clone();
 
     let config_mutex = Arc::new(Mutex::new(config.clone()));
     let init_status_rw_lock = Arc::new(RwLock::new(init_status));

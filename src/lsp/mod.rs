@@ -268,10 +268,6 @@ impl ProtocolState {
         }
     }
 
-    pub fn clear(&mut self) {
-        self.contracts.clear();
-    }
-
     pub fn consolidate(
         &mut self,
         paths: &mut BTreeMap<QualifiedContractIdentifier, (Url, PathBuf)>,
@@ -328,71 +324,6 @@ impl ProtocolState {
         keywords.append(&mut contract_keywords);
         keywords.append(&mut contract_calls);
         keywords
-    }
-
-    pub fn get_aggregated_diagnostics(
-        &self,
-    ) -> (Vec<(Url, Vec<Diagnostic>)>, Option<(MessageType, String)>) {
-        let mut contracts = vec![];
-        let mut erroring_files = HashSet::new();
-        let mut warning_files = HashSet::new();
-
-        for (contract_url, state) in self.contracts.iter() {
-            let mut diags = vec![];
-
-            // Convert and collect errors
-            if !state.errors.is_empty() {
-                if let Some(file_name) = state.path.file_name().and_then(|f| f.to_str()) {
-                    erroring_files.insert(file_name);
-                }
-                for error in state.errors.iter() {
-                    diags.push(error.clone());
-                }
-            }
-
-            // Convert and collect warnings
-            if !state.warnings.is_empty() {
-                if let Some(file_name) = state.path.file_name().and_then(|f| f.to_str()) {
-                    warning_files.insert(file_name);
-                }
-                for warning in state.warnings.iter() {
-                    diags.push(warning.clone());
-                }
-            }
-
-            // Convert and collect notes
-            for note in state.notes.iter() {
-                diags.push(note.clone());
-            }
-            contracts.push((contract_url.clone(), diags));
-        }
-
-        let tldr = match (erroring_files.len(), warning_files.len()) {
-            (0, 0) => None,
-            (0, warnings) if warnings > 0 => Some((
-                MessageType::Warning,
-                format!(
-                    "Warning detected in following contracts: {}",
-                    warning_files.into_iter().collect::<Vec<_>>().join(", ")
-                ),
-            )),
-            (errors, 0) if errors > 0 => Some((
-                MessageType::Error,
-                format!(
-                    "Errors detected in following contracts: {}",
-                    erroring_files.into_iter().collect::<Vec<_>>().join(", ")
-                ),
-            )),
-            (_errors, _warnings) => Some((
-                MessageType::Error,
-                format!(
-                    "Errors and warnings detected in following contracts: {}",
-                    erroring_files.into_iter().collect::<Vec<_>>().join(", ")
-                ),
-            )),
-        };
-
-        (contracts, tldr)
     }
 }
 
@@ -517,7 +448,7 @@ fn start_server(command_rx: Receiver<LspRequest>) {
                 // With this manifest_path, let's initialize our state.
                 let mut protocol_state = ProtocolState::new();
                 match build_state(&manifest_path, &mut protocol_state) {
-                    Ok(contracts_updates) => {
+                    Ok(_) => {
                         editor_state.index_protocol(manifest_path, protocol_state);
                         let (aggregated_diagnostics, notification) =
                             editor_state.get_aggregated_diagnostics();
@@ -538,7 +469,7 @@ fn start_server(command_rx: Receiver<LspRequest>) {
                 // We will rebuild the entire state, without to try any optimizations for now
                 let mut protocol_state = ProtocolState::new();
                 match build_state(&manifest_path, &mut protocol_state) {
-                    Ok(contracts_updates) => {
+                    Ok(_) => {
                         editor_state.index_protocol(manifest_path, protocol_state);
                         let (aggregated_diagnostics, notification) =
                             editor_state.get_aggregated_diagnostics();
@@ -589,10 +520,6 @@ fn start_server(command_rx: Receiver<LspRequest>) {
     }
 }
 
-pub fn reset_state(protocol_state: &mut ProtocolState) {
-    protocol_state.clear();
-}
-
 pub fn build_state(
     manifest_path: &PathBuf,
     protocol_state: &mut ProtocolState,
@@ -608,7 +535,7 @@ pub fn build_state(
     // expect contracts to be created, edited, removed.
     // A on-disk deployment could quickly lead to an outdated
     // view of the repo.
-    let (deployment, mut artifacts) = generate_default_deployment(&manifest_path, &None)?;
+    let (deployment, artifacts) = generate_default_deployment(&manifest_path, &None)?;
     for (contract_id, (contract_ast, contract_deps, contract_diags)) in artifacts.into_iter() {
         asts.insert(contract_id.clone(), contract_ast);
         deps.insert(contract_id.clone(), contract_deps);
@@ -644,7 +571,7 @@ pub fn build_state(
 }
 
 #[test]
-fn test_opening_contract_should_return_fresh_analysis() {
+fn test_opening_counter_contract_should_return_fresh_analysis() {
     use std::sync::mpsc::channel;
 
     let (tx, rx) = mpsc::channel();
@@ -678,7 +605,7 @@ fn test_opening_contract_should_return_fresh_analysis() {
 }
 
 #[test]
-fn test_opening_manifest_should_return_fresh_analysis() {
+fn test_opening_counter_manifest_should_return_fresh_analysis() {
     use std::sync::mpsc::channel;
 
     let (tx, rx) = mpsc::channel();
@@ -707,4 +634,31 @@ fn test_opening_manifest_should_return_fresh_analysis() {
     let _ = tx.send(LspRequest::ManifestOpened(manifest_path, response_tx));
     let response = response_rx.recv().expect("Unable to get response");
     assert_eq!(response, Response::default());
+}
+
+#[test]
+fn test_opening_simple_nft_manifest_should_return_fresh_analysis() {
+    use std::sync::mpsc::channel;
+
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        start_server(rx);
+    });
+
+    let mut manifest_path = std::env::current_dir().expect("Unable to get current dir");
+    manifest_path.push("examples");
+    manifest_path.push("simple-nft");
+    manifest_path.push("Clarinet.toml");
+
+    let (response_tx, response_rx) = channel();
+    let _ = tx.send(LspRequest::ManifestOpened(
+        manifest_path.clone(),
+        response_tx.clone(),
+    ));
+    let response = response_rx.recv().expect("Unable to get response");
+
+    // the counter project should emit 2 warnings and 2 notes coming from counter.clar
+    assert_eq!(response.aggregated_diagnostics.len(), 2);
+    let (url, diags) = &response.aggregated_diagnostics[0];
+    assert_eq!(diags.len(), 8);
 }

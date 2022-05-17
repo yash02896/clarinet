@@ -379,12 +379,3 @@ pub fn get_contract_file(text_document_uri: &Url) -> Option<PathBuf> {
         _ => None,
     }
 }
-
-pub fn get_file_name(uri: &Url) -> Option<String> {
-    uri.to_file_path()
-        .ok()
-        .as_ref()
-        .and_then(|f| f.file_name())
-        .and_then(|f| f.to_str())
-        .and_then(|f| Some(f.to_string()))
-}
