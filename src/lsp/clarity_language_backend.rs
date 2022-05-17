@@ -1,10 +1,10 @@
-use super::{utils, EditorState, LspRequest};
+use super::{utils, LspRequest};
 use serde_json::Value;
 use std::sync::mpsc::channel;
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::RwLock;
+
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{async_trait, Client, LanguageServer};

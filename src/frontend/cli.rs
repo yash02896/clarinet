@@ -1,5 +1,5 @@
 use crate::deployment::{
-    apply_on_chain_deployment, check_deployments, display_deployment, generate_default_deployment,
+    apply_on_chain_deployment, check_deployments, generate_default_deployment,
     get_absolute_deployment_path, get_default_deployment_path, load_deployment,
     load_deployment_if_exists, read_or_default_to_generated_deployment,
     setup_session_with_deployment, write_deployment,
@@ -18,13 +18,13 @@ use clarity_repl::clarity::costs::LimitedCostTracker;
 use clarity_repl::clarity::diagnostic::Level;
 use clarity_repl::clarity::types::QualifiedContractIdentifier;
 use clarity_repl::{analysis, repl, Terminal};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{HashMap};
 use std::fs::{self, File};
 use std::io::{prelude::*, BufReader, Read};
 use std::path::PathBuf;
 use std::sync::mpsc::channel;
 use std::{env, process};
-use tower_lsp::lsp_types::DiagnosticSeverity;
+
 
 use clap::{IntoApp, Parser, Subcommand};
 use clap_generate::{Generator, Shell};

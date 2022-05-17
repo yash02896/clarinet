@@ -4,17 +4,16 @@ mod ui;
 
 use self::types::{
     DeploymentSpecification, EmulatedContractPublishSpecification, GenesisSpecification,
-    TransactionPlanSpecification, TransactionPlanSpecificationFile, TransactionsBatchSpecification,
+    TransactionPlanSpecification, TransactionsBatchSpecification,
     WalletSpecification,
 };
 use crate::deployment::types::ContractPublishSpecification;
 use crate::deployment::types::{
-    DeploymentSpecificationFile, TransactionSpecification, TransactionSpecificationFile,
-    TransactionsBatchSpecificationFile,
+    TransactionSpecification,
 };
-use crate::integrate::DevnetEvent;
+
 use crate::types::{
-    AccountConfig, ChainConfig, ChainsCoordinatorCommand, ProjectManifest, ProjectManifestFile,
+    AccountConfig, ChainConfig, ProjectManifest,
     StacksNetwork,
 };
 use crate::utils::mnemonic;
@@ -30,7 +29,7 @@ use clarity_repl::clarity::codec::transaction::{
 use clarity_repl::clarity::codec::StacksMessageCodec;
 use clarity_repl::clarity::diagnostic::Diagnostic;
 use clarity_repl::clarity::types::{
-    PrincipalData, QualifiedContractIdentifier, StandardPrincipalData,
+    PrincipalData, QualifiedContractIdentifier,
 };
 use clarity_repl::clarity::util::{
     C32_ADDRESS_VERSION_MAINNET_SINGLESIG, C32_ADDRESS_VERSION_TESTNET_SINGLESIG,
@@ -54,12 +53,12 @@ use clarity_repl::repl::{ExecutionResult, Session};
 use libsecp256k1::{PublicKey, SecretKey};
 use serde_yaml;
 use std::collections::VecDeque;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::mpsc::{Receiver, Sender};
 use tiny_hderive::bip32::ExtendedPrivKey;
 
 #[derive(Deserialize, Debug)]
@@ -302,7 +301,7 @@ pub fn update_session_with_contracts_analyses(
                         diagnostics.append(&mut annotation_diagnostics);
                         let mut ast = ast.clone();
 
-                        let (mut analysis, mut analysis_diagnostics) = match session
+                        let (analysis, mut analysis_diagnostics) = match session
                             .interpreter
                             .run_analysis(contract_id.clone(), &mut ast, &annotations)
                         {

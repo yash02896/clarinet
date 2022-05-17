@@ -14,7 +14,7 @@ use clarity_repl::clarity::representations::ClarityName;
 use clarity_repl::clarity::types::{BuffData, SequenceData, TupleData, Value as ClarityValue};
 use clarity_repl::clarity::util::address::AddressHashMode;
 use clarity_repl::clarity::util::hash::{hex_bytes, Hash160};
-use clarity_repl::repl::settings::{Account, InitialContract};
+use clarity_repl::repl::settings::{InitialContract};
 use clarity_repl::repl::Session;
 use rocket::config::{Config, LogLevel};
 use rocket::serde::json::{json, Json, Value as JsonValue};
@@ -32,8 +32,7 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex, RwLock};
 use tracing::info;
 
-#[cfg(feature = "cli")]
-use crate::runnner::deno;
+
 
 #[derive(Deserialize)]
 pub struct NewTransaction {
