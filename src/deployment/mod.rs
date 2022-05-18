@@ -4,18 +4,12 @@ mod ui;
 
 use self::types::{
     DeploymentSpecification, EmulatedContractPublishSpecification, GenesisSpecification,
-    TransactionPlanSpecification, TransactionsBatchSpecification,
-    WalletSpecification,
+    TransactionPlanSpecification, TransactionsBatchSpecification, WalletSpecification,
 };
 use crate::deployment::types::ContractPublishSpecification;
-use crate::deployment::types::{
-    TransactionSpecification,
-};
+use crate::deployment::types::TransactionSpecification;
 
-use crate::types::{
-    AccountConfig, ChainConfig, ProjectManifest,
-    StacksNetwork,
-};
+use crate::types::{AccountConfig, ChainConfig, ProjectManifest, StacksNetwork};
 use crate::utils::mnemonic;
 use crate::utils::stacks::StacksRpc;
 use clarity_repl::analysis::ast_dependency_detector::{ASTDependencyDetector, DependencySet};
@@ -28,9 +22,7 @@ use clarity_repl::clarity::codec::transaction::{
 };
 use clarity_repl::clarity::codec::StacksMessageCodec;
 use clarity_repl::clarity::diagnostic::Diagnostic;
-use clarity_repl::clarity::types::{
-    PrincipalData, QualifiedContractIdentifier,
-};
+use clarity_repl::clarity::types::{PrincipalData, QualifiedContractIdentifier};
 use clarity_repl::clarity::util::{
     C32_ADDRESS_VERSION_MAINNET_SINGLESIG, C32_ADDRESS_VERSION_TESTNET_SINGLESIG,
 };
@@ -52,8 +44,7 @@ use clarity_repl::repl::SessionSettings;
 use clarity_repl::repl::{ExecutionResult, Session};
 use libsecp256k1::{PublicKey, SecretKey};
 use serde_yaml;
-use std::collections::VecDeque;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::PathBuf;
@@ -91,11 +82,11 @@ pub enum ContractStatus {
 }
 
 pub fn encode_contract_call(
-    contract_name: &ContractName,
-    source: &str,
-    nonce: u64,
-    deployment_fee_rate: u64,
-    network: &StacksNetwork,
+    _contract_name: &ContractName,
+    _source: &str,
+    _nonce: u64,
+    _deployment_fee_rate: u64,
+    _network: &StacksNetwork,
 ) -> Result<(StacksTransaction, StacksAddress), String> {
     Err(format!("unimplemented"))
 }
@@ -225,7 +216,7 @@ pub fn update_session_with_genesis_accounts(
 pub fn update_session_with_contracts_executions(
     session: &mut Session,
     deployment: &DeploymentSpecification,
-    contracts_asts: &Option<BTreeMap<QualifiedContractIdentifier, ContractAST>>,
+    _contracts_asts: &Option<BTreeMap<QualifiedContractIdentifier, ContractAST>>,
 ) -> BTreeMap<QualifiedContractIdentifier, Result<ExecutionResult, Vec<Diagnostic>>> {
     let mut results = BTreeMap::new();
     for batch in deployment.plan.batches.iter() {
@@ -342,7 +333,7 @@ pub fn get_absolute_deployment_path(
     base_path.pop();
     let path = match PathBuf::from_str(relative_deployment_path) {
         Ok(path) => path,
-        Err(e) => {
+        Err(_e) => {
             println!("unable to read path {}", relative_deployment_path);
             std::process::exit(1);
         }
@@ -434,7 +425,7 @@ pub fn apply_on_chain_deployment(
         let mut batch = Vec::new();
         for transaction in batch_spec.transactions.iter() {
             match transaction {
-                TransactionSpecification::ContractCall(tx) => {
+                TransactionSpecification::ContractCall(_tx) => {
                     // Retrieve nonce for issuer
                     unimplemented!();
                 }
@@ -495,7 +486,7 @@ pub fn apply_on_chain_deployment(
     let mut current_block_height = 0;
     for batch in batches.into_iter() {
         let mut ongoing_batch = BTreeMap::new();
-        for (sender, contract_name, tx, status) in batch.into_iter() {
+        for (sender, contract_name, tx, _status) in batch.into_iter() {
             let _ = match stacks_rpc.post_transaction(tx) {
                 Ok(res) => {
                     ongoing_batch.insert(
@@ -503,7 +494,7 @@ pub fn apply_on_chain_deployment(
                         (sender, contract_name, TransactionStatus::Broadcasted),
                     );
                 }
-                Err(e) => return,
+                Err(_e) => return,
             };
         }
 
@@ -527,7 +518,7 @@ pub fn apply_on_chain_deployment(
 
             let mut keep_looping = false;
 
-            for (txid, (deployer, contract_name, status)) in ongoing_batch.iter_mut() {
+            for (_txid, (deployer, contract_name, status)) in ongoing_batch.iter_mut() {
                 match *status {
                     TransactionStatus::Broadcasted => {
                         let res =
@@ -564,7 +555,7 @@ pub fn check_deployments(manifest_path: &PathBuf) -> Result<(), String> {
     base_path.pop();
     let files = get_deployments_files(manifest_path)?;
     for (path, relative_path) in files.into_iter() {
-        let spec = match DeploymentSpecification::from_config_file(&path, &base_path) {
+        let _spec = match DeploymentSpecification::from_config_file(&path, &base_path) {
             Ok(spec) => spec,
             Err(msg) => {
                 println!("{} {} syntax incorrect\n{}", red!("x"), relative_path, msg);
@@ -714,22 +705,34 @@ pub fn generate_default_deployment(
 
     let mut transactions = vec![];
     let mut contracts_map = BTreeMap::new();
+    let mut requirements_asts = BTreeMap::new();
+    let mut requirements_deps = HashMap::new();
+
+    let mut settings = SessionSettings::default();
+    let parser_version = project_config.repl_settings.parser_version;
+    settings.repl_settings = project_config.repl_settings.clone();
+    let session = Session::new(settings.clone());
+    let mut boot_contracts_asts = session.get_boot_contracts_asts();
+    requirements_asts.append(&mut boot_contracts_asts);
 
     // Only handle requirements in test environments
-    if network.is_none() && project_config.project.requirements.is_some() {
+    if project_config.project.requirements.is_some() {
         let default_cache_path = match PathBuf::from_str(&project_config.project.cache_dir) {
             Ok(path) => path,
             Err(_) => return Err("unable to get default cache path".to_string()),
         };
         let mut contracts = HashMap::new();
+
         let requirements = project_config.project.requirements.take().unwrap();
 
         // Load all the requirements
+        // Some requirements are explicitly listed, some are discovered as we compute the ASTs.
         let mut queue = VecDeque::new();
+
         for requirement in requirements.into_iter() {
             let contract_id = match QualifiedContractIdentifier::parse(&requirement.contract_id) {
                 Ok(contract_id) => contract_id,
-                Err(e) => {
+                Err(_e) => {
                     return Err(format!(
                         "malformatted contract_id: {}",
                         requirement.contract_id
@@ -739,72 +742,99 @@ pub fn generate_default_deployment(
             queue.push_front(contract_id);
         }
 
-        let mut handled: HashMap<
-            QualifiedContractIdentifier,
-            (ContractAST, String, DependencySet),
-        > = HashMap::new();
-
-        let settings = SessionSettings::default();
-        let mut session = Session::new(settings);
-
         while let Some(contract_id) = queue.pop_front() {
             // Extract principal from contract_id
-            if handled.contains_key(&contract_id) {
+            if requirements_deps.contains_key(&contract_id) {
                 continue;
             }
 
-            // Download the code
-            let (source, path) = requirements::retrieve_contract(
-                &contract_id,
-                true,
-                Some(default_cache_path.clone()),
-            )?;
+            // Did we already got the source in a prior cycle?
+            let ast = match requirements_asts.remove(&contract_id) {
+                Some(ast) => ast,
+                None => {
+                    // Download the code
+                    let (source, path) = requirements::retrieve_contract(
+                        &contract_id,
+                        true,
+                        Some(default_cache_path.clone()),
+                    )?;
 
-            let data = EmulatedContractPublishSpecification {
-                contract: contract_id.name.clone(),
-                emulated_sender: contract_id.issuer.clone(),
-                source: source.clone(),
-                relative_path: format!("{}", path.display()),
-            };
-            contracts.insert(contract_id.clone(), data);
+                    // Build the struct representing the requirement in the deployment
+                    let data = EmulatedContractPublishSpecification {
+                        contract: contract_id.name.clone(),
+                        emulated_sender: contract_id.issuer.clone(),
+                        source: source.clone(),
+                        relative_path: format!("{}", path.display()),
+                    };
+                    contracts.insert(contract_id.clone(), data);
 
-            let (ast, _, _) = session
-                .interpreter
-                .build_ast(contract_id.clone(), source.clone(), 2);
-            let mut contract_asts = HashMap::new();
-            contract_asts.insert(contract_id.clone(), ast.clone());
-            let dependencies =
-                ASTDependencyDetector::detect_dependencies(&contract_asts, &BTreeMap::new());
-            if let Ok(dependencies) = dependencies {
-                for (contract_id, dependencies) in dependencies.into_iter() {
-                    for dependency in dependencies.iter() {
-                        queue.push_back(dependency.contract_id.clone());
-                    }
-                    handled.insert(contract_id, (ast, source, dependencies));
-                    break;
+                    // Compute the AST
+                    let (ast, _, _) = session.interpreter.build_ast(
+                        contract_id.clone(),
+                        source.to_string(),
+                        parser_version,
+                    );
+                    ast
                 }
-            } else {
-                // TODO(lgalabru): do something
-            }
-        }
-
-        let mut unordered_dependencies = HashMap::new();
-        for (contract_id, (_, _, dependencies)) in handled.into_iter() {
-            unordered_dependencies.insert(contract_id, dependencies);
-        }
-
-        let ordered_contracts_ids =
-            match ASTDependencyDetector::order_contracts(&unordered_dependencies) {
-                Ok(ordered_contracts) => ordered_contracts,
-                Err(e) => return Err(format!("unable order contracts {}", e)),
             };
 
-        for contract_id in ordered_contracts_ids.iter() {
-            let data = contracts
-                .remove(contract_id)
-                .expect("unable to retrieve contract");
-            let tx = TransactionSpecification::EmulatedContractPublish(data);
-            transactions.push(tx);
+            // Detect the eventual dependencies for this AST
+            let mut contract_ast = HashMap::new();
+            contract_ast.insert(contract_id.clone(), ast);
+            let dependencies =
+                ASTDependencyDetector::detect_dependencies(&contract_ast, &requirements_asts);
+            let ast = contract_ast
+                .remove(&contract_id)
+                .expect("unable to retrieve ast");
+
+            // Extract the known / unknown dependencies
+            match dependencies {
+                Ok(inferable_dependencies) => {
+                    // Looping could be confusing - in this case, we submitted a HashMap with one contract, so we have at most one
+                    // result in the `inferable_dependencies` map. We will just extract and keep the associated data (source, ast, deps).
+                    for (contract_id, dependencies) in inferable_dependencies.into_iter() {
+                        for dependency in dependencies.iter() {
+                            queue.push_back(dependency.contract_id.clone());
+                        }
+                        requirements_deps.insert(contract_id.clone(), dependencies);
+                        requirements_asts.insert(contract_id.clone(), ast);
+                        break;
+                    }
+                }
+                Err((inferable_dependencies, non_inferable_dependencies)) => {
+                    // In the case of unknown dependencies, we were unable to construct an exhaustive list of dependencies.
+                    // As such, we will enqueue re-enqueue the present (front) and push all the unknown contract_ids in front of it,
+                    // and we will keep the source in memory to avoid useless disk access.
+                    for (_, dependencies) in inferable_dependencies.iter() {
+                        for dependency in dependencies.iter() {
+                            queue.push_back(dependency.contract_id.clone());
+                        }
+                    }
+                    requirements_asts.insert(contract_id.clone(), ast);
+                    queue.push_front(contract_id);
+
+                    for non_inferable_contract_id in non_inferable_dependencies.into_iter() {
+                        queue.push_front(non_inferable_contract_id);
+                    }
+                }
+            };
+        }
+
+        // Avoid listing requirements as deployment transactions to the deployment specification on Devnet / Testnet / Mainnet
+        if network.is_none() {
+            let ordered_contracts_ids =
+                match ASTDependencyDetector::order_contracts(&requirements_deps) {
+                    Ok(ordered_contracts) => ordered_contracts,
+                    Err(e) => return Err(format!("unable to order contracts {}", e)),
+                };
+
+            for contract_id in ordered_contracts_ids.iter() {
+                let data = contracts
+                    .remove(contract_id)
+                    .expect("unable to retrieve contract");
+                let tx = TransactionSpecification::EmulatedContractPublish(data);
+                transactions.push(tx);
+            }
         }
     }
 
@@ -871,44 +901,45 @@ pub fn generate_default_deployment(
         contracts.insert(contract_id, contract);
     }
 
-    let settings = SessionSettings::default();
     let session = Session::new(settings);
 
     let mut contract_asts = HashMap::new();
     let mut contract_diags = HashMap::new();
 
     for (contract_id, contract) in contracts.iter() {
-        let (ast, diags, _) =
-            session
-                .interpreter
-                .build_ast(contract_id.clone(), contract.source.clone(), 2);
+        let (ast, diags, _) = session.interpreter.build_ast(
+            contract_id.clone(),
+            contract.source.clone(),
+            parser_version,
+        );
         contract_asts.insert(contract_id.clone(), ast);
         contract_diags.insert(contract_id.clone(), diags);
     }
 
-    let dependencies = ASTDependencyDetector::detect_dependencies(
-        &contract_asts,
-        &session.get_boot_contracts_asts(),
-    );
+    let dependencies =
+        ASTDependencyDetector::detect_dependencies(&contract_asts, &requirements_asts);
 
     let mut dependencies = match dependencies {
         Ok(dependencies) => dependencies,
-        Err((dependencies, missing)) => {
-            // TODO(lgalabru): do something
-            println!("==> {:?}", missing);
-            dependencies
+        Err(_) => {
+            return Err(format!("unable to detect dependencies"));
         }
     };
+
+    dependencies.extend(requirements_deps);
 
     let ordered_contracts_ids = match ASTDependencyDetector::order_contracts(&dependencies) {
         Ok(ordered_contracts_ids) => ordered_contracts_ids
             .into_iter()
             .map(|c| c.clone())
             .collect::<Vec<_>>(),
-        Err(e) => return Err(format!("unable order contracts {}", e)),
+        Err(e) => return Err(format!("unable to order contracts {}", e)),
     };
 
     for contract_id in ordered_contracts_ids.into_iter() {
+        if requirements_asts.contains_key(&contract_id) {
+            continue;
+        }
         let data = contracts
             .remove(&contract_id)
             .expect("unable to retrieve contract");
@@ -930,15 +961,18 @@ pub fn generate_default_deployment(
         transactions.push(tx);
 
         let contract_id = contract_id.clone();
-        // TODO(lgalabru): to be cleaned
-        let dep = dependencies.remove(&contract_id).unwrap();
-        let ast = contract_asts.remove(&contract_id).unwrap();
-        let diags = contract_diags.remove(&contract_id).unwrap();
+        let dep = dependencies
+            .remove(&contract_id)
+            .expect("unable to retrieve dependency set");
+        let ast = contract_asts
+            .remove(&contract_id)
+            .expect("unable to retrieve ast");
+        let diags = contract_diags.remove(&contract_id).unwrap_or_default();
 
         artifacts.insert(contract_id, (ast, dep, diags));
     }
 
-    let tx_chain_limit = 25;
+    let _tx_chain_limit = 25;
 
     let mut batches = vec![];
     for (id, transactions) in transactions.chunks(25).enumerate() {
@@ -967,37 +1001,29 @@ pub fn generate_default_deployment(
         });
     }
 
-    // TODO(lgalabru): use project_config.repl_settings.include_boot_contracts.clone()
-    let boot_contracts = vec!["pox".to_string(), "costs-v2".to_string(), "bns".to_string()];
+    let name = match network {
+        None => format!("Test deployment, used as a default for `clarinet console`, `clarinet test` and `clarinet check`"),
+        Some(network) => format!("{:?} deployment", network)
+    };
 
     let deployment = DeploymentSpecification {
         id: 0,
-        name: "Test deployment, used by default by `clarinet console`, `clarinet test` and `clarinet check`".to_string(),
+        name,
         network: network.clone(),
         start_block: 0,
         genesis: if network.is_none() {
             Some(GenesisSpecification {
                 wallets,
-                contracts: boot_contracts
+                contracts: project_config.project.boot_contracts.clone(),
             })
-            } else { None },
-        plan: TransactionPlanSpecification {
-            batches
+        } else {
+            None
         },
+        plan: TransactionPlanSpecification { batches },
         contracts: contracts_map,
     };
-
-    // settings.include_boot_contracts = vec![
-    //     "pox".to_string(),
-    //     "costs-v1".to_string(),
-    //     "costs-v2".to_string(),
-    //     "bns".to_string(),
-    // ];
-    // settings.initial_deployer = initial_deployer;
-    // settings.repl_settings = project_config.repl_settings.clone();
-    // settings.disk_cache_enabled = true;
 
     Ok((deployment, artifacts))
 }
 
-pub fn display_deployment(deployment: &DeploymentSpecification) {}
+pub fn display_deployment(_deployment: &DeploymentSpecification) {}

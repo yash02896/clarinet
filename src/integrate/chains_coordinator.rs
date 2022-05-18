@@ -14,7 +14,7 @@ use clarity_repl::clarity::representations::ClarityName;
 use clarity_repl::clarity::types::{BuffData, SequenceData, TupleData, Value as ClarityValue};
 use clarity_repl::clarity::util::address::AddressHashMode;
 use clarity_repl::clarity::util::hash::{hex_bytes, Hash160};
-use clarity_repl::repl::settings::{InitialContract};
+use clarity_repl::repl::settings::InitialContract;
 use clarity_repl::repl::Session;
 use rocket::config::{Config, LogLevel};
 use rocket::serde::json::{json, Json, Value as JsonValue};
@@ -31,8 +31,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex, RwLock};
 use tracing::info;
-
-
 
 #[derive(Deserialize)]
 pub struct NewTransaction {
@@ -104,27 +102,6 @@ impl StacksEventObserverConfig {
             deployment_fee_rate: chain_config.network.deployment_fee_rate,
         }
     }
-
-    // pub async fn execute_scripts(&self) {
-    //     if self.devnet_config.execute_script.len() > 0 {
-    //         // TODO(lgalabru): Build cache
-
-    //         for _cmd in self.devnet_config.execute_script.iter() {
-    //             #[cfg(feature = "cli")]
-    //             let _ = deno::do_run_scripts(
-    //                 vec![_cmd.script.clone()],
-    //                 false,
-    //                 false,
-    //                 false,
-    //                 _cmd.allow_wallets,
-    //                 _cmd.allow_write,
-    //                 self.manifest_path.clone(),
-    //                 None,
-    //             )
-    //             .await;
-    //         }
-    //     }
-    // }
 }
 
 pub async fn start_chains_coordinator(
@@ -133,9 +110,6 @@ pub async fn start_chains_coordinator(
     chains_coordinator_commands_rx: Receiver<ChainsCoordinatorCommand>,
     chains_coordinator_commands_tx: Sender<ChainsCoordinatorCommand>,
 ) -> Result<(), Box<dyn Error>> {
-    // TODO(lgalabru): re-enable
-    // let _ = config.execute_scripts().await;
-
     let indexer = Indexer::new(IndexerConfig {
         stacks_node_rpc_url: format!(
             "http://localhost:{}",

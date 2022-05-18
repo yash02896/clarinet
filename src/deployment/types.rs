@@ -2,9 +2,7 @@ use clarity_repl::clarity::types::{
     PrincipalData, QualifiedContractIdentifier, StandardPrincipalData,
 };
 
-
 use clarity_repl::clarity::{ClarityName, ContractName};
-
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -14,9 +12,7 @@ use std::path::PathBuf;
 
 use std::fs;
 
-
-
-use crate::types::{StacksNetwork};
+use crate::types::StacksNetwork;
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct TransactionPlanSpecification {
@@ -431,7 +427,7 @@ impl DeploymentSpecification {
                 }
                 (TransactionPlanSpecification { batches }, genesis)
             }
-            Some(network) => {
+            Some(_network) => {
                 let mut batches = vec![];
                 if let Some(ref plan) = specs.plan {
                     for batch in plan.batches.iter() {

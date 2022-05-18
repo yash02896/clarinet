@@ -253,7 +253,7 @@ impl ChainConfig {
                             let derivation = match account_settings.get("derivation") {
                                 Some(Value::String(derivation)) => derivation.to_string(),
                                 _ => DEFAULT_DERIVATION_PATH.to_string(),
-                            }; // TODO(lgalabru): use derivation path
+                            };
 
                             let (address, _, _) =
                                 compute_addresses(&mnemonic, &derivation, is_mainnet);

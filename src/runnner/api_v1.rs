@@ -1,10 +1,15 @@
 use super::utils;
 use super::DeploymentCache;
 use crate::deployment::types::DeploymentSpecification;
+use crate::deployment::update_session_with_contracts_executions;
+use clarity_repl::clarity::analysis::contract_interface_builder::{
+    build_contract_interface, ContractInterface,
+};
 use clarity_repl::clarity::coverage::TestCoverageReport;
 use clarity_repl::clarity::types;
 use clarity_repl::repl::Session;
 use deno::tools::test_runner::TestEvent;
+use deno::tsc::exec;
 use deno::{create_main_worker, ProgramState};
 use deno_core::error::AnyError;
 use deno_core::serde_json::{self, json, Value};
@@ -32,31 +37,31 @@ pub async fn run_bridge(
     manifest_path: PathBuf,
     allow_wallets: bool,
     mut cache: Option<DeploymentCache>,
-) -> Result<(), AnyError> {
+) -> Result<Vec<SessionArtifacts>, AnyError> {
     let mut worker = create_main_worker(&program_state, main_module.clone(), permissions, true);
     let (event_tx, event_rx) = mpsc::channel();
     {
         let js_runtime = &mut worker.js_runtime;
-        js_runtime.register_op("api/v2/new_session", deno_core::op_sync(new_session));
+        js_runtime.register_op("api/v1/new_session", deno_core::op_sync(new_session));
         js_runtime.register_op(
-            "api/v2/load_deployment",
+            "api/v1/load_deployment",
             deno_core::op_sync(load_deployment),
         );
         js_runtime.register_op(
-            "api/v2/terminate_session",
+            "api/v1/terminate_session",
             deno_core::op_sync(terminate_session),
         );
-        js_runtime.register_op("api/v2/mine_block", deno_core::op_sync(mine_block));
+        js_runtime.register_op("api/v1/mine_block", deno_core::op_sync(mine_block));
         js_runtime.register_op(
-            "api/v2/mine_empty_blocks",
+            "api/v1/mine_empty_blocks",
             deno_core::op_sync(mine_empty_blocks),
         );
         js_runtime.register_op(
-            "api/v2/call_read_only_fn",
+            "api/v1/call_read_only_fn",
             deno_core::op_sync(call_read_only_fn),
         );
         js_runtime.register_op(
-            "api/v2/get_assets_maps",
+            "api/v1/get_assets_maps",
             deno_core::op_sync(get_assets_maps),
         );
 
@@ -112,7 +117,11 @@ pub async fn run_bridge(
         return Err(e);
     }
 
-    Ok(())
+    let mut artifacts = vec![];
+    while let Ok(ClarinetTestEvent::SessionTerminated(artifact)) = event_rx.try_recv() {
+        artifacts.push(artifact);
+    }
+    Ok(artifacts)
 }
 
 pub fn deprecation_notice(state: &mut OpState, args: Value, _: ()) -> Result<(), AnyError> {
@@ -155,7 +164,10 @@ pub fn new_session(state: &mut OpState, args: Value, _: ()) -> Result<String, An
                         }
                     }
                     if entry.is_none() {
-                        // Build the cache entry and insert it
+                        // TODO(lgalabru): Ability to specify a deployment plan in tests
+                        // https://github.com/hirosystems/clarinet/issues/357
+                        println!("{}: feature identified, but is not supported yet. Please comment in https://github.com/hirosystems/clarinet/issues/357", red!("Error"));
+                        std::process::exit(1);
                     }
                 }
                 entry
@@ -165,8 +177,7 @@ pub fn new_session(state: &mut OpState, args: Value, _: ()) -> Result<String, An
                 if let Some(default_entry) = default_entry.take() {
                     Some(default_entry)
                 } else {
-                    None
-                    // Build the cache entry
+                    unreachable!();
                 }
             }
         };
@@ -174,7 +185,6 @@ pub fn new_session(state: &mut OpState, args: Value, _: ()) -> Result<String, An
     };
 
     let allow_wallets = state.borrow::<bool>();
-
     let accounts = if *allow_wallets {
         cache.deployment.genesis.as_ref().unwrap().wallets.clone()
     } else {
@@ -221,26 +231,72 @@ pub fn new_session(state: &mut OpState, args: Value, _: ()) -> Result<String, An
 #[serde(rename_all = "camelCase")]
 struct LoadDeploymentArgs {
     session_id: u32,
+    deployment_path: Option<String>,
 }
 
 pub fn load_deployment(state: &mut OpState, args: Value, _: ()) -> Result<String, AnyError> {
     let args: LoadDeploymentArgs =
         serde_json::from_value(args).expect("Invalid request from JavaScript for \"op_load\".");
-    // let (session_id, accounts, contracts) = complete_setup_chain(args.session_id)?;
-    // let serialized_contracts = contracts.iter().map(|(a, s, _)| json!({
-    //   "contract_id": a.contract_identifier.to_string(),
-    //   "contract_interface": a.contract_interface.clone(),
-    //   "dependencies": a.dependencies.clone().into_iter().map(|c| c.to_string()).collect::<Vec<String>>(),
-    //   "source": s
-    // })).collect::<Vec<_>>();
 
-    // let allow_wallets = state.borrow::<bool>();
-    // let accounts = if *allow_wallets { accounts } else { vec![] };
+    // Retrieve deployment
+    let deployment = {
+        let caches = state.borrow::<HashMap<Option<String>, DeploymentCache>>();
+        let cache = caches
+            .get(&args.deployment_path)
+            .expect("unable to retrieve deployment");
+        cache.deployment.clone()
+    };
+
+    // Retrieve session
+    let sessions = state
+        .try_borrow_mut::<HashMap<u32, (String, Session)>>()
+        .expect("unable to retrieve sessions");
+    let (label, session) = sessions
+        .get_mut(&args.session_id)
+        .expect("unable to retrieve session");
+
+    // Execute deployment on session
+    let results = update_session_with_contracts_executions(session, &deployment, &None);
+    let mut serialized_contracts = vec![];
+    for (contract_id, result) in results.into_iter() {
+        match result {
+            Ok(execution) => {
+                if let Some((_, source, functions, ast, analysis)) = execution.contract {
+                    serialized_contracts.push(json!({
+                        "contract_id": contract_id.to_string(),
+                        "contract_interface": build_contract_interface(&analysis),
+                        "source": source,
+                    }))
+                }
+            }
+            Err(e) => {
+                println!(
+                    "{}: unable to load deployment {:?} in test {}",
+                    red!("Error"),
+                    args.deployment_path,
+                    label
+                );
+                std::process::exit(1);
+            }
+        }
+    }
+
+    let allow_wallets = state.borrow::<bool>();
+    let accounts = if *allow_wallets {
+        deployment.genesis.as_ref().unwrap().wallets.clone()
+    } else {
+        vec![]
+    };
 
     Ok(json!({
         "session_id": args.session_id,
-        "accounts": json!([]),
-        "contracts": json!([]),
+        "accounts": accounts.iter().map(|a| json!({
+            "address": a.address.to_string(),
+            "balance": u64::try_from(a.balance)
+                .expect("u128 unsupported at the moment, please open an issue."),
+            "name": a.name.to_string(),
+            })).collect::<Vec<_>>(),
+        "contracts": serialized_contracts,
     })
     .to_string())
 }
@@ -252,25 +308,27 @@ struct TerminateSessionArgs {
 }
 
 pub fn terminate_session(state: &mut OpState, args: Value, _: ()) -> Result<(), AnyError> {
-    // let args: TerminateSessionArgs =
-    //     serde_json::from_value(args).expect("Invalid request from JavaScript for \"op_load\".");
-    // let (session_id, accounts, contracts) = complete_setup_chain(args.session_id)?;
-    // let serialized_contracts = contracts.iter().map(|(a, s, _)| json!({
-    //   "contract_id": a.contract_identifier.to_string(),
-    //   "contract_interface": a.contract_interface.clone(),
-    //   "dependencies": a.dependencies.clone().into_iter().map(|c| c.to_string()).collect::<Vec<String>>(),
-    //   "source": s
-    // })).collect::<Vec<_>>();
+    let args: TerminateSessionArgs =
+        serde_json::from_value(args).expect("Invalid request from JavaScript for \"op_load\".");
 
-    // let allow_wallets = state.borrow::<bool>();
-    // let accounts = if *allow_wallets { accounts } else { vec![] };
+    // Retrieve session
+    let session_artifacts = {
+        let sessions = state
+            .try_borrow_mut::<HashMap<u32, (String, Session)>>()
+            .expect("unable to retrieve sessions");
+        let (label, session) = sessions
+            .get_mut(&args.session_id)
+            .expect("unable to retrieve session");
 
-    // Ok(json!({
-    //     "session_id": session_id,
-    //     "accounts": accounts,
-    //     "contracts": serialized_contracts,
-    // })
-    // .to_string())
+        let mut coverage_reports = vec![];
+        coverage_reports.append(&mut session.coverage_reports);
+
+        SessionArtifacts { coverage_reports }
+    };
+
+    let tx = state.borrow::<Sender<ClarinetTestEvent>>();
+    let _ = tx.send(ClarinetTestEvent::SessionTerminated(session_artifacts));
+
     Ok(())
 }
 

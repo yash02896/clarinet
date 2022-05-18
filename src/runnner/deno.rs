@@ -1,4 +1,5 @@
-use super::{api_v2, costs, DeploymentCache};
+use super::api_v1::SessionArtifacts;
+use super::{api_v1, costs, DeploymentCache};
 use clarity_repl::clarity::coverage::CoverageReporter;
 use clarity_repl::clarity::types;
 use clarity_repl::repl::Session;
@@ -245,11 +246,15 @@ pub async fn do_run_scripts(
                     allow_wallets,
                     None,
                 )
-                .map(|res| {
-                    if include_costs_report {
-                        // TODO(lgalabru)
-                        // costs::display_costs_report()
-                    }
+                .map(|mut res| {
+                    match res.as_mut() {
+                        Ok((success, sessions_artifacts)) if *success => {
+                            if include_costs_report {
+                                costs::display_costs_report(sessions_artifacts)
+                            }
+                        }
+                        _ => {}
+                    };
                     res.map(|_| ())
                 })
             },
@@ -265,7 +270,7 @@ pub async fn do_run_scripts(
             tools::test_runner::is_supported,
         )?;
 
-        let failed = run_scripts(
+        let (success, sessions_artifacts) = run_scripts(
             program_state.clone(),
             permissions,
             lib,
@@ -279,37 +284,38 @@ pub async fn do_run_scripts(
             concurrent_jobs,
             manifest_path,
             allow_wallets,
-            Some(cache),
+            Some(cache.clone()),
         )
         .await?;
 
-        if failed {
+        if !success {
             std::process::exit(1);
         }
+
+        if include_coverage {
+            let mut coverage_reporter = CoverageReporter::new();
+            for (contract_id, analysis_artifacts) in cache.contracts_artifacts.iter() {
+                coverage_reporter
+                    .asts
+                    .insert(contract_id.clone(), analysis_artifacts.ast.clone());
+            }
+            for (contract_id, (_, contract_path)) in cache.deployment.contracts.iter() {
+                coverage_reporter
+                    .contract_paths
+                    .insert(contract_id.name.to_string(), contract_path.clone());
+            }
+            for mut artifact in sessions_artifacts.into_iter() {
+                coverage_reporter
+                    .reports
+                    .append(&mut artifact.coverage_reports);
+            }
+            coverage_reporter.write_lcov_file("coverage.lcov");
+        }
+
+        if include_costs_report {
+            // costs::display_costs_report()
+        }
     }
-
-    // if include_coverage {
-    //     let mut coverage_reporter = CoverageReporter::new();
-    //     let sessions = HashMap::new();
-    //     for (session_id, (name, session, deployment)) in sessions.iter() {
-    //         for contract in session.settings.initial_contracts.iter() {
-    //             if let Some(ref name) = contract.name {
-    //                 if contract.path != "" {
-    //                     coverage_reporter.register_contract(name.clone(), contract.path.clone());
-    //                 }
-    //             }
-    //         }
-    //         coverage_reporter.add_reports(&session.coverage_reports);
-    //         coverage_reporter.add_asts(&session.asts);
-    //     }
-
-    //     coverage_reporter.write_lcov_file("coverage.lcov");
-    // }
-
-    // if include_costs_report {
-    //     costs::display_costs_report()
-    // }
-
     Ok(0 as u32)
 }
 
@@ -337,7 +343,7 @@ pub async fn run_scripts(
     manifest_path: PathBuf,
     allow_wallets: bool,
     cache: Option<DeploymentCache>,
-) -> Result<bool, AnyError> {
+) -> Result<(bool, Vec<SessionArtifacts>), AnyError> {
     if !doc_modules.is_empty() {
         let mut test_programs = Vec::new();
 
@@ -420,7 +426,7 @@ pub async fn run_scripts(
             std::process::exit(1);
         }
 
-        return Ok(false);
+        return Ok((false, vec![]));
     }
 
     let execution_result = program_state
@@ -438,7 +444,7 @@ pub async fn run_scripts(
     }
 
     if no_run {
-        return Ok(false);
+        return Ok((false, vec![]));
     }
 
     // Because scripts, and therefore worker.execute cannot detect unresolved promises at the moment
@@ -473,7 +479,7 @@ pub async fn run_scripts(
         let manifest = manifest_path.clone();
         tokio::task::spawn_blocking(move || {
             let join_handle = std::thread::spawn(move || {
-                let future = api_v2::run_bridge(
+                let future = api_v1::run_bridge(
                     program_state,
                     main_module,
                     test_module,
@@ -493,7 +499,7 @@ pub async fn run_scripts(
 
     let join_futures = stream::iter(join_handles)
         .buffer_unordered(concurrent_jobs)
-        .collect::<Vec<Result<Result<(), AnyError>, tokio::task::JoinError>>>();
+        .collect::<Vec<Result<Result<Vec<SessionArtifacts>, AnyError>, tokio::task::JoinError>>>();
 
     let mut reporter = create_reporter(concurrent_jobs > 1);
     let handler = {
@@ -560,18 +566,22 @@ pub async fn run_scripts(
         })
     };
 
-    let (result, join_results) = future::join(handler, join_futures).await;
+    let (result, mut join_results) = future::join(handler, join_futures).await;
 
-    let mut join_errors = join_results.into_iter().filter_map(|join_result| {
-        join_result
-            .ok()
-            .map(|handle_result| handle_result.err())
-            .flatten()
-    });
+    let mut reports = vec![];
+    let mut error = None;
+    for mut res in join_results.drain(..) {
+        if let Ok(Ok(artifacts)) = res.as_mut() {
+            reports.append(artifacts);
+        } else if let Ok(Err(e)) = res {
+            error = Some(e);
+            break;
+        }
+    }
 
-    if let Some(e) = join_errors.next() {
+    if let Some(e) = error {
         Err(e)
     } else {
-        Ok(result.unwrap_or(false))
+        Ok((result.unwrap_or(false), reports))
     }
 }
